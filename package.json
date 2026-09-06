@@ -1,0 +1,21 @@
+{
+  "name": "devquest",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "check": "node --check src/server.js && node --check src/engine.js && node --check src/adapters.js && node --check src/store.js && node --check public/app.js"
+  },
+  "dependencies": {
+    "mammoth": "^1.12.2",
+    "pdfjs-dist": "^6.3.289"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.6"
+  }
+}

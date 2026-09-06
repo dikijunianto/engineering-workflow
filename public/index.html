@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#101314" />
+    <title>DevQuest — Engineering workspace</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <a href="#home" class="brand"
+        ><span class="brandmark">D<span>◆</span></span
+        >DevQuest<span class="version">v1</span></a
+      >
+      <div class="workspace">
+        <span class="workspace-icon">W</span>
+        <div>
+          Engineering workspace<small>Personal · Local environment</small>
+        </div>
+      </div>
+      <div class="nav-label">WORKSPACE</div>
+      <nav aria-label="Main navigation">
+        <a href="#home" data-nav="home"><span>◈</span>Overview</a>
+        <a href="#quests" data-nav="quests"
+          ><span>⚑</span>Quests<span id="quest-count" class="nav-count"
+            >0</span
+          ></a
+        >
+        <a href="#repositories" data-nav="repositories"
+          ><span>▱</span>Repositories</a
+        >
+        <a href="#agents" data-nav="agents"><span>⌘</span>Agent party</a>
+        <a href="#jira" data-nav="jira"><span>◇</span>Jira tasks</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="local-note">
+          <i></i>Workflow stored locally<small
+            >Your machine. Your workflow.</small
+          >
+        </div>
+        <a href="#settings" data-nav="settings"
+          >⚙ <span>Settings & integrations</span></a
+        >
+        <div class="profile">
+          <span>Y</span>
+          <div>Your workspace<small>Engineer</small></div>
+          <span class="online">●</span>
+        </div>
+      </div>
+    </aside>
+    <div class="shell">
+      <header class="topbar">
+        <div class="breadcrumb">
+          Workspace <span>/</span> <strong id="breadcrumb">Overview</strong>
+        </div>
+        <div class="top-right">
+          <span class="local-tag"><i></i>LOCAL</span
+          ><span class="separator"></span><span class="date" id="today"></span>
+        </div>
+      </header>
+      <main id="main" tabindex="-1">
+        <div class="loading">Loading your workspace…</div>
+      </main>
+      <footer>
+        Built for the work between an idea and a pull request.<span
+          >DevQuest · Local first</span
+        >
+      </footer>
+    </div>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+    <dialog id="dialog"><div id="dialog-content"></div></dialog>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
