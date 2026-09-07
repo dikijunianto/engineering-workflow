@@ -13,6 +13,10 @@ const assets = new Map([
   ["/", ["index.html", "text/html"]],
   ["/app.js", ["app.js", "text/javascript"]],
   ["/style.css", ["style.css", "text/css"]],
+  [
+    "/devquest/backgrounds/midnight-reach.png",
+    ["devquest/backgrounds/midnight-reach.png", "image/png"],
+  ],
 ]);
 const json = (response, status, value) => {
   response.writeHead(status, {

@@ -19,6 +19,48 @@ let state,
   token,
   loading = false;
 const liveOutput = new Map();
+// Presentation-only primitives. Action handlers and API payloads stay below.
+const icons = {
+  sword: '<path d="m14 4 6-1-1 6-9 9-4-4Z M5 13l6 6 M7 17l-4 4 M2 19l3 3"/>',
+  home: '<path d="m3 10 9-7 9 7 M5 9v12h5v-7h4v7h5V9"/>',
+  quest: '<path d="M6 21V3m0 1c5-4 7 4 13 0v10c-6 4-8-4-13 0"/>',
+  repository:
+    '<path d="M5 3h13v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 14h13 M8 3v7l3-2 3 2V3"/>',
+  party:
+    '<circle cx="12" cy="7" r="3"/><path d="M7 20v-3a5 5 0 0 1 10 0v3 M5 9a3 3 0 0 0-2 5m16-5a3 3 0 0 1 2 5 M2 21v-2a4 4 0 0 1 3-4m17 6v-2a4 4 0 0 0-3-4"/>',
+  jira: '<path d="m12 2 10 10-10 10L2 12Z m0 6 4 4-4 4-4-4Z"/>',
+  settings:
+    '<path d="m9 3-1 3-3 1 1 4-2 2 2 3 3-1 2 3 4-1 1-3 3-1-1-4 2-2-2-3-3 1-2-3Z"/><circle cx="12" cy="11" r="3"/>',
+  layers: '<path d="m12 3 10 5-10 5L2 8Zm-9 9 9 5 9-5M3 17l9 5 9-5"/>',
+  branch:
+    '<circle cx="6" cy="5" r="2"/><circle cx="18" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10m12-10a8 8 0 0 1-8 8H6"/>',
+  architect: '<path d="m12 2 9 6v12H3V8Zm0 0v20M3 8l9 6 9-6M7 5l10 7"/>',
+  planner:
+    '<rect x="4" y="4" width="16" height="17" rx="2"/><path d="M8 2v4m8-4v4M8 11h8m-8 5h5"/>',
+  developer: '<path d="m8 7-5 5 5 5m8-10 5 5-5 5m-3-13-2 20"/>',
+  reviewer: '<path d="m12 2 8 4v6c0 5-8 10-8 10S4 17 4 12V6Z m-5 10 3 3 5-6"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 2"/>',
+  document: '<path d="M5 3h10l4 4v14H5Zm10 0v5h4M8 12h8m-8 4h6"/>',
+  spark: '<path d="m12 2 3 7 7 3-7 3-3 7-3-7-7-3 7-3Z"/>',
+  arrow: '<path d="M4 12h16m-6-6 6 6-6 6"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
+  alert: '<path d="m12 3 10 18H2Zm0 6v5m0 3v1"/>',
+};
+const icon = (name) =>
+  `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.quest}</svg>`;
+const roles = [
+  {
+    key: "architect",
+    label: "Architect",
+    purposes: ["brainstorm", "analysis", "trd"],
+  },
+  { key: "planner", label: "Planner", purposes: ["plan"] },
+  { key: "developer", label: "Developer", purposes: ["task"] },
+  { key: "reviewer", label: "Reviewer", purposes: ["review"] },
+];
+const roleFor = (run) =>
+  roles.find((r) => r.purposes.includes(run.purpose)) || roles[2];
+const runtimeName = (key) => (key === "codex" ? "Codex" : "Claude Code");
 const labels = {
   home: "Overview",
   quests: "Quests",
@@ -42,7 +84,18 @@ const button = (label, action, data = {}, style = "") =>
 function badge(status) {
   const warn = /WAITING|PAUSED|INTERRUPTED|REVIEW|DRAFT|AWAITING/.test(status);
   const bad = /FAIL|RECOVERY|BLOCK/.test(status);
-  return `<span class="badge ${bad ? "bad" : warn ? "warn" : /PLANNED|PUBLISHED|READY/.test(status) ? "neutral" : ""}">${esc(status.replaceAll("_", " "))}</span>`;
+  const tone = bad
+    ? "bad"
+    : warn
+      ? "warn"
+      : /RUNNING|EXECUTING/.test(status)
+        ? "running"
+        : /UNAVAILABLE|NOT_CONFIGURED|IDLE|PLANNED|PUBLISHED/.test(status)
+          ? "neutral"
+          : /TECH|PRODUCT/.test(status)
+            ? "special"
+            : "";
+  return `<span class="badge ${tone}"><span class="status-dot" aria-hidden="true"></span>${esc(status.replaceAll("_", " "))}</span>`;
 }
 const repository = (id) => state.repositories.find((r) => r.id === id);
 const questTasks = (id) => state.tasks.filter((t) => t.questId === id);
@@ -59,15 +112,15 @@ const pct = (quest) => {
 };
 const bar = (value) =>
   `<progress class="native-progress" max="100" value="${value}" aria-label="Progress ${value}%">${value}%</progress>`;
-const empty = (icon, title, copy, action = "") =>
-  `<div class="empty"><span class="empty-icon">${icon}</span><h3>${title}</h3><p>${copy}</p>${action}</div>`;
+const empty = (symbol, title, copy, action = "") =>
+  `<div class="empty"><span class="empty-icon">${symbol.startsWith("<svg") ? symbol : icon({ "▱": "repository", "✳": "party", "◇": "jira", "◷": "clock", "☷": "document" }[symbol] || "quest")}</span><h3>${title}</h3><p>${copy}</p>${action}</div>`;
 const head = (
   title,
   subtitle,
   action = "",
   eyebrow = "YOUR ENGINEERING WORKSPACE",
 ) =>
-  `<div class="page-head"><div><div class="eyebrow">${eyebrow}</div><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div>${action}</div>`;
+  `<div class="page-head"><div class="hero-copy"><div class="eyebrow">${eyebrow}</div><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div><div class="hero-aside"><p class="hero-quote">${title === "Repositories" ? "Small repositories<br>build greater adventures." : "Small commits.<br>A greater world."}</p>${action}</div></div>`;
 const panel = (title, body, link = "") =>
   `<section class="panel"><div class="panel-head"><h2>${title}</h2>${link}</div>${body}</section>`;
 const time = (value) =>
@@ -75,6 +128,101 @@ const time = (value) =>
     hour: "2-digit",
     minute: "2-digit",
   });
+function latestAttempts(runs) {
+  // The store returns insertion order; retries replace only their own scope.
+  const latest = new Map();
+  for (const run of runs)
+    latest.set(
+      JSON.stringify([
+        run.questId,
+        run.purpose,
+        run.taskId || run.workId || null,
+      ]),
+      run,
+    );
+  return [...latest.values()];
+}
+function partyCards(runs = state.runs) {
+  return `<div class="party-grid">${roles
+    .map((role) => {
+      const matching = latestAttempts(runs).filter(
+        (r) => roleFor(r).key === role.key,
+      );
+      const run =
+        matching.find((r) =>
+          [
+            "RUNNING",
+            "WAITING_INPUT",
+            "PAUSED",
+            "INTERRUPTED",
+            "FAILED",
+          ].includes(r.state),
+        ) || matching.at(-1);
+      const active =
+        run &&
+        [
+          "RUNNING",
+          "WAITING_INPUT",
+          "PAUSED",
+          "INTERRUPTED",
+          "FAILED",
+        ].includes(run.state);
+      return `<article class="party-member ${role.key}"><span class="role-avatar">${icon(role.key)}</span><h3>${role.label}</h3><small>${run ? runtimeName(run.runtime) : "Choose on start"}</small>${badge(active ? run.state : "IDLE")}${run ? `<a class="party-context" href="#quest/${esc(run.questId)}/overview">${esc(state.quests.find((q) => q.id === run.questId)?.title || "View Quest")}</a>` : ""}</article>`;
+    })
+    .join("")}</div>`;
+}
+function questChain(quest) {
+  const id = quest.id;
+  const stage =
+    quest.state === "PRS_CREATED"
+      ? 7
+      : quest.state === "READY_FOR_PR"
+        ? 6
+        : ["EXECUTING", "TASKS_PUBLISHED"].includes(quest.state)
+          ? 5
+          : quest.state === "PLAN_APPROVED"
+            ? 4
+            : quest.state === "PLAN_DRAFT" || quest.state === "TRD_APPROVED"
+              ? 3
+              : artifact(id, "analysis") || quest.state.startsWith("TRD")
+                ? 2
+                : quest.kind === "PRODUCT" || artifact(id, "technical-brief")
+                  ? 1
+                  : 0;
+  const blocked =
+    latestAttempts(state.runs).some(
+      (r) =>
+        r.questId === id &&
+        /FAILED|WAITING_INPUT|INTERRUPTED|PAUSED/.test(r.state),
+    ) ||
+    state.works.some(
+      (w) => w.questId === id && w.state === "RECOVERY_REQUIRED",
+    );
+  return `<ol class="pipeline" aria-label="Quest workflow">${[quest.kind === "TECH" ? "Brief" : "PRD", "Analysis", "TRD", "Plan", "Jira", "Execute", "PR", "Done"].map((name, i) => `<li class="${i < stage || (i === 7 && stage === 7) ? "done" : i === stage ? `current${blocked ? " blocked" : ""}` : "future"}" ${i === stage ? 'aria-current="step"' : ""}><span class="step-number">${i < stage || (i === 7 && stage === 7) ? icon("check") : i + 1}</span><span>${name}<small>${i === stage && blocked ? "Needs attention" : i < stage ? "Complete" : i === stage ? (stage === 7 ? "Complete" : "Current stage") : "Upcoming"}</small></span></li>`).join("")}</ol>`;
+}
+function repositoryCards(quest) {
+  return `<div class="repository-cards">${quest.repositoryIds
+    .map((id) => {
+      const repo = repository(id),
+        work = state.works.find(
+          (w) => w.questId === quest.id && w.repoId === id,
+        );
+      const tasks = questTasks(quest.id).filter((t) => t.repoId === id),
+        done = tasks.filter((t) => t.state === "COMPLETED").length;
+      return `<article class="repository-card"><div class="repository-identity"><span class="repo-emblem">${icon("repository")}</span><div><h3 title="${esc(repo?.name)}">${esc(repo?.name)}</h3><small class="truncate" title="${esc(repo?.path)}">${esc(repo?.path)}</small></div></div><div class="progress-row">${bar(tasks.length ? Math.round((done / tasks.length) * 100) : 0)}<span>${done}/${tasks.length} tasks</span></div><div class="branch-label">${icon("branch")}<span title="${esc(work?.branch)}">${esc(work?.branch || "Prepared on first execution")}</span></div><div class="row-head">${badge(work?.state || "PLANNED")}<a class="subtle-link" href="#quest/${quest.id}/repositories">View details ${icon("arrow")}</a></div></article>`;
+    })
+    .join("")}</div>`;
+}
+function questTaskTable(quest) {
+  const tasks = questTasks(quest.id);
+  return tasks.length
+    ? `<div class="table-scroll" tabindex="0" role="region" aria-label="Quest tasks"><table><thead><tr><th>Objective</th><th>Repository</th><th>Status</th><th>Dependencies</th></tr></thead><tbody>${tasks.map((t) => `<tr><td><a class="table-title" href="#quest/${quest.id}/tasks">${esc(t.jira?.key || t.key)}</a><small>${esc(t.title)}</small></td><td>${esc(repository(t.repoId)?.name)}</td><td>${badge(t.state)}</td><td class="number">${t.dependencies.map((id) => esc(state.tasks.find((other) => other.id === id)?.key)).join(", ") || "—"}</td></tr>`).join("")}</tbody></table></div>`
+    : empty(
+        icon("jira"),
+        "No objectives planned yet",
+        "Your approved plan will become the task queue for this Quest.",
+      );
+}
 
 async function refresh() {
   if (loading) return;
@@ -111,7 +259,7 @@ async function action(type, data = {}) {
 function questRow(quest) {
   const tasks = questTasks(quest.id),
     progress = pct(quest);
-  return `<a href="#quest/${quest.id}/overview" class="quest-row"><div class="row-head"><div class="quest-title"><span class="quest-icon">${quest.kind === "PRODUCT" ? "⚑" : "⌘"}</span><div><h3>${esc(quest.title)}</h3><small>${quest.kind === "PRODUCT" ? "Product Quest" : "Tech Quest"} · ${quest.id.slice(0, 8).toUpperCase()}</small></div></div>${badge(quest.state)}</div><div class="row-meta"><span>▱ ${quest.repositoryIds.length} repositories</span><span>✓ ${tasks.filter((t) => t.state === "COMPLETED").length} / ${tasks.length} tasks</span><span>${esc(quest.sprint || "No sprint assigned")}</span></div><div class="progress-row">${bar(progress)}<span>${progress}%</span></div></a>`;
+  return `<a href="#quest/${quest.id}/overview" class="quest-row"><div class="row-head"><div class="quest-title"><span class="quest-icon">${icon(quest.kind === "PRODUCT" ? "quest" : "architect")}</span><div><h3>${esc(quest.title)}</h3><small>${quest.kind === "PRODUCT" ? "Product Quest" : "Tech Quest"} · ${quest.id.slice(0, 8).toUpperCase()}</small></div></div>${badge(quest.state)}</div><div class="row-meta"><span>▱ ${quest.repositoryIds.length} repositories</span><span>✓ ${tasks.filter((t) => t.state === "COMPLETED").length} / ${tasks.length} tasks</span><span>${esc(quest.sprint || "No sprint assigned")}</span></div><div class="progress-row">${bar(progress)}<span>${progress}%</span></div></a>`;
 }
 function agentsPanel() {
   return (
@@ -120,7 +268,7 @@ function agentsPanel() {
         const runs = state.runs.filter(
           (r) => r.runtime === key && r.state === "RUNNING",
         );
-        return `<div class="agent-row"><span class="agent-avatar ${key}">${key === "codex" ? "✳" : "✴"}</span><div><strong>${key === "codex" ? "Codex" : "Claude Code"}</strong><small>${runs.length ? `${runs.length} active session${runs.length > 1 ? "s" : ""}` : "Ready when you are"}</small></div>${badge(!runtime.available ? "UNAVAILABLE" : runs.length ? "RUNNING" : "IDLE")}</div>`;
+        return `<div class="agent-row"><span class="agent-avatar ${key}">${icon(key === "codex" ? "developer" : "spark")}</span><div><strong>${key === "codex" ? "Codex" : "Claude Code"}</strong><small>${runs.length ? `${runs.length} active session${runs.length > 1 ? "s" : ""}` : "Ready when you are"}</small></div>${badge(!runtime.available ? "UNAVAILABLE" : runs.length ? "RUNNING" : "IDLE")}</div>`;
       })
       .join("") +
     '<div class="hint">Your agents, one shared workflow.<br>Sessions start only when you choose.</div>'
@@ -149,12 +297,12 @@ function repoTable(repos = state.repositories) {
       "Register a local Git repository to give your Quests a place to work.",
       button("+ Add repository", "add-repository", {}, "small"),
     );
-  return `<table><thead><tr><th>Repository</th><th>Base branch</th><th>Activity</th><th>Works</th></tr></thead><tbody>${repos
+  return `<div class="table-scroll" tabindex="0" role="region" aria-label="Repository registry"><table class="registry-table"><thead><tr><th>Repository</th><th>Base branch</th><th>Activity</th><th>Works</th></tr></thead><tbody>${repos
     .map((repo) => {
       const works = state.works.filter((w) => w.repoId === repo.id);
-      return `<tr><td class="repo-name"><span>▱</span>${esc(repo.name)}<small>${esc(repo.path)}</small></td><td><span class="number">⑂ development</span></td><td>${badge(works.find((w) => w.state === "EXECUTING") ? "EXECUTING" : "READY")}</td><td>${works.length}</td></tr>`;
+      return `<tr><td class="repo-name"><div class="repository-identity"><span class="repo-emblem">${icon("repository")}</span><div><strong title="${esc(repo.name)}">${esc(repo.name)}</strong><small class="truncate" title="${esc(repo.path)}">${esc(repo.path)}</small></div></div></td><td><span class="branch-label">${icon("branch")}development</span></td><td>${badge(works.find((w) => w.state === "EXECUTING") ? "EXECUTING" : "READY")}</td><td><span class="work-count">${works.length}</span></td></tr>`;
     })
-    .join("")}</tbody></table>`;
+    .join("")}</tbody></table></div>`;
 }
 function home() {
   const active = state.quests.filter((q) => q.state !== "PRS_CREATED");
@@ -192,8 +340,8 @@ function home() {
       ],
     ]
       .map(
-        ([label, number, copy, icon]) =>
-          `<div class="stat"><div class="stat-label">${label}<span>${icon}</span></div><div class="stat-number">${number.toString().padStart(2, "0")}</div><small>${copy}</small></div>`,
+        ([label, number, copy, glyph]) =>
+          `<div class="stat"><div class="stat-label">${label}<span aria-hidden="true">${icon({ "⚑": "quest", "✳": "party", "▱": "repository", "◉": "alert" }[glyph])}</span></div><div class="stat-number">${number.toString().padStart(2, "0")}</div><small>${copy}</small></div>`,
       )
       .join("")}</div>
     <section class="sprint"><div><div class="eyebrow">CURRENT SPRINT</div><h3>${esc(sprint || "Make room for your next milestone.")}</h3><p>${sprint ? `${sprintQuests.length} Quests in this sprint` : "Assign a sprint when you create a Quest."}</p></div><div><div class="row-meta"><span>${finished} / ${sprintQuests.length} complete</span></div>${bar(sprintQuests.length ? (finished / sprintQuests.length) * 100 : 0)}</div></section>
@@ -224,7 +372,8 @@ function agents() {
       "Agent party",
       "Interact with your agents and pick up from a saved checkpoint.",
     ) +
-    `<div class="setting-grid">${Object.entries(state.runtimes)
+    panel(`${icon("party")} Your party`, partyCards()) +
+    `<div class="setting-grid section-space">${Object.entries(state.runtimes)
       .map(([key, r]) =>
         panel(
           key === "codex" ? "Codex" : "Claude Code",
@@ -245,7 +394,8 @@ function runCard(run) {
     "FAILED",
     "COMPLETED",
   ].includes(run.state);
-  return `<section class="panel run-card"><div class="row-head"><h3>${run.runtime === "codex" ? "✳ Codex" : "✴ Claude Code"} · ${esc(task?.title || run.purpose)}</h3>${badge(run.state)}</div>${run.pid ? `<small>Process ${run.pid} · ${esc(run.cwd)}</small>` : ""}<p>${esc(run.summary || "The session is running. Live output is temporary; save points preserve essential context.")}</p><pre class="run-output" data-output="${run.id}">${esc(liveOutput.get(run.id) || "")}</pre><div class="task-actions">${run.state === "RUNNING" ? button("Pause", "PAUSE_AGENT", { "run-id": run.id }) + button("Interrupt", "INTERRUPT_AGENT", { "run-id": run.id }, "ghost") : ""}${waiting && task?.state !== "COMPLETED" ? button("Continue", "CONTINUE_AGENT", { "run-id": run.id }, "primary small") : ""}${button("Save checkpoint", "checkpoint", { "run-id": run.id }, "small")}</div>${waiting ? `<form data-form="message" data-run="${run.id}"><label>Instruction for this agent<textarea name="message" rows="2" required placeholder="Clarify a decision or give the next instruction…"></textarea></label><button class="btn small" type="submit">Send instruction ↗</button><div class="form-error" role="alert"></div></form>` : "<small>Pause the current turn to send a new instruction.</small>"}</section>`;
+  const role = roleFor(run);
+  return `<section class="panel run-card ${role.key}"><div class="row-head"><div class="run-identity"><span class="role-avatar">${icon(role.key)}</span><div><small>${role.label} · ${runtimeName(run.runtime)}</small><h3>${esc(task?.title || run.purpose)}</h3></div></div>${badge(run.state)}</div>${run.pid ? `<small class="truncate" title="${esc(run.cwd)}">Process ${run.pid} · ${esc(run.cwd)}</small>` : ""}${["PAUSED", "INTERRUPTED"].includes(run.state) ? `<div class="savepoint-note">${icon("clock")}<div><strong>Progress preserved</strong><small>Last Save Point${run.updatedAt ? ` · ${time(run.updatedAt)}` : ""}. Continue when you are ready.</small></div></div>` : ""}<p>${esc(run.summary || (run.state === "RUNNING" ? "The session is running. Live output is temporary; save points preserve essential context." : "No summary is available yet. Inspect the preserved worktree and save points before continuing."))}</p><pre class="run-output" data-output="${run.id}">${esc(liveOutput.get(run.id) || "")}</pre><div class="task-actions">${run.state === "RUNNING" ? button("Pause", "PAUSE_AGENT", { "run-id": run.id }) + button("Interrupt", "INTERRUPT_AGENT", { "run-id": run.id }, "danger") : ""}${waiting && task?.state !== "COMPLETED" ? button("Continue", "CONTINUE_AGENT", { "run-id": run.id }, "primary small") : ""}${button("Save checkpoint", "checkpoint", { "run-id": run.id }, "small")}</div>${waiting ? `<form data-form="message" data-run="${run.id}"><label>Instruction for this agent<textarea name="message" rows="2" required placeholder="Clarify a decision or give the next instruction…"></textarea></label><button class="btn small" type="submit">Send instruction ↗</button><div class="form-error" role="alert"></div></form>` : "<small>Pause the current turn to send a new instruction.</small>"}</section>`;
 }
 function jira() {
   const tasks = state.tasks.filter((t) => t.jira);
@@ -257,7 +407,7 @@ function jira() {
     panel(
       "Published tasks",
       tasks.length
-        ? `<table><thead><tr><th>Issue</th><th>Task</th><th>Repository</th><th>State</th></tr></thead><tbody>${tasks.map((t) => `<tr><td><a href="${safeUrl(t.jira.url)}" target="_blank" rel="noreferrer">${esc(t.jira.key)} ↗</a></td><td>${esc(t.title)}</td><td>${esc(repository(t.repoId)?.name)}</td><td>${badge(t.state)}</td></tr>`).join("")}</tbody></table>`
+        ? `<div class="table-scroll" tabindex="0" role="region" aria-label="Published Jira tasks"><table><thead><tr><th>Issue</th><th>Task</th><th>Repository</th><th>State</th></tr></thead><tbody>${tasks.map((t) => `<tr><td><a class="table-title" href="${safeUrl(t.jira.url)}" target="_blank" rel="noreferrer">${esc(t.jira.key)} ↗</a></td><td>${esc(t.title)}</td><td>${esc(repository(t.repoId)?.name)}</td><td>${badge(t.state)}</td></tr>`).join("")}</tbody></table></div>`
         : empty(
             "◇",
             "Nothing published yet",
@@ -286,21 +436,6 @@ function questView(id, tab = "overview") {
   const tasks = questTasks(id),
     works = state.works.filter((w) => w.questId === id),
     runs = state.runs.filter((r) => r.questId === id);
-  const stages = ["Intake", "TRD", "Plan", "Jira", "Execute", "PR"];
-  const stage =
-    quest.state === "PRS_CREATED"
-      ? 6
-      : quest.state === "READY_FOR_PR"
-        ? 5
-        : quest.state === "EXECUTING"
-          ? 4
-          : quest.state === "TASKS_PUBLISHED"
-            ? 3
-            : quest.state.startsWith("PLAN")
-              ? 2
-              : quest.state.startsWith("TRD")
-                ? 1
-                : 0;
   const tabs = ["overview", "tasks", "repositories", "artifacts", "activity"];
   let body = "";
   if (tab === "overview") {
@@ -386,7 +521,7 @@ function questView(id, tab = "overview") {
         (quest.autoExecute
           ? button("Pause scheduling", "PAUSE_QUEST", { "quest-id": id })
           : "");
-    body = `<div class="grid-main"><div class="stack">${panel("Next step", `<div class="panel-body"><p>${quest.state === "PRS_CREATED" ? "All pull requests have been created. This Quest is complete." : active ? "An agent session needs to finish or continue." : "Review your artifacts and choose the next action."}</p><div class="toolbar">${next}${next ? runtime : ""}</div>${quest.warnings?.length ? `<div class="warning">${quest.warnings.map(esc).join("<br>")}<label class="checks"><input type="checkbox" id="accept-warnings">Continue with incomplete source context</label></div>` : ""}</div>`)}${panel("Quest brief", `<pre class="document">${esc(artifact(id, quest.kind === "PRODUCT" ? "prd" : "technical-brief")?.content || artifact(id, "idea")?.content || "")}</pre>`)}${runs.slice(-2).reverse().map(runCard).join("")}</div><div class="stack">${panel("At a glance", `<div class="panel-body"><div class="row-meta">${badge(quest.state)}</div><div class="progress-row">${bar(pct(quest))}<span>${pct(quest)}%</span></div><p class="section-space">${tasks.length} tasks · ${works.length} repository works</p><small>${esc(quest.sprint || "No sprint assigned")}</small></div>`)}${panel("Affected repositories", `<div class="source-list">${quest.repositoryIds.map((key) => `<p>▱ ${esc(repository(key)?.name)}</p>`).join("")}</div>`)}${quest.sources?.length ? panel("Context loaded", `<div class="source-list">${quest.sources.map((source) => `<p><a href="${safeUrl(source.url)}" target="_blank" rel="noreferrer">${esc(source.title)} ↗</a><small>Version ${esc(source.version)}</small></p>`).join("")}</div>`) : ""}</div></div>`;
+    body = `<section class="next-step"><div>${icon("spark")}<div><h2>${quest.state === "PRS_CREATED" ? "Quest complete" : "Next step"}</h2><p>${quest.state === "PRS_CREATED" ? "All pull requests have been created." : active ? "An agent session needs to finish or continue." : "Review your artifacts and choose the next action."}</p></div></div><div class="toolbar">${next}${next ? runtime : ""}</div>${quest.warnings?.length ? `<div class="warning">${quest.warnings.map(esc).join("<br>")}<label class="checks"><input type="checkbox" id="accept-warnings">Continue with incomplete source context</label></div>` : ""}</section><div class="grid-main quest-overview"><div class="stack">${panel(`${icon("document")} Quest summary`, `<pre class="document brief-document">${esc(artifact(id, quest.kind === "PRODUCT" ? "prd" : "technical-brief")?.content || artifact(id, "idea")?.content || "")}</pre>`, `<a class="subtle-link" href="#quest/${id}/artifacts">All artifacts ${icon("arrow")}</a>`)}${panel(`${icon("repository")} Affected repositories`, repositoryCards(quest), `<span class="panel-count">${quest.repositoryIds.length} repositories</span>`)}${panel(`${icon("jira")} Jira tasks & objectives`, questTaskTable(quest), `<a class="subtle-link" href="#quest/${id}/tasks">Execution queue ${icon("arrow")}</a>`)}</div><div class="stack">${panel(`${icon("party")} Agent party`, partyCards(runs))}${runs.length ? runs.slice(-2).reverse().map(runCard).join("") : panel(`${icon("developer")} Active agent`, empty(icon("developer"), "Your party is standing by", "Start the next step to bring an agent into this Quest."))}${panel(`${icon("clock")} Recent activity`, activity(state.events.filter((e) => e.questId === id)), `<a class="subtle-link" href="#quest/${id}/activity">View all ${icon("arrow")}</a>`)}${quest.sources?.length ? panel("Context loaded", `<div class="source-list">${quest.sources.map((source) => `<p><a href="${safeUrl(source.url)}" target="_blank" rel="noreferrer">${esc(source.title)} ↗</a><small>Version ${esc(source.version)}</small></p>`).join("")}</div>`) : ""}</div></div>`;
   }
   if (tab === "tasks")
     body = panel(
@@ -440,23 +575,30 @@ function questView(id, tab = "overview") {
       "Decisions & milestones",
       activity(state.events.filter((e) => e.questId === id)),
     );
-  return `${head(quest.title, `${quest.kind === "PRODUCT" ? "Product" : "Tech"} Quest · ${quest.id.slice(0, 8).toUpperCase()}`, '<a class="btn ghost" href="#quests">← All Quests</a>', "QUEST CONTROL CENTER")}<div class="pipeline">${stages.map((name, index) => `<span class="${index < stage ? "done" : index === stage ? "current" : ""}">${index < stage ? "✓" : index + 1} ${name}</span>${index < 5 ? "<span>→</span>" : ""}`).join("")}</div><div class="tabs">${tabs.map((name) => `<a href="#quest/${id}/${name}" class="${tab === name ? "active" : ""}">${name[0].toUpperCase() + name.slice(1)}</a>`).join("")}</div>${body}`;
+  return `<section class="page-head quest-hero"><div class="hero-copy"><div class="row-meta">${badge(`${quest.kind} QUEST`)}<span class="number">${quest.id.slice(0, 8).toUpperCase()}</span></div><h1>${esc(quest.title)}</h1><div class="quest-facts"><div><small>Status</small>${badge(quest.state)}</div><div><small>Sprint</small><strong>${esc(quest.sprint || "Unassigned")}</strong></div><div><small>Repositories</small><strong>${quest.repositoryIds.length} connected</strong></div><div><small>Repository works</small><strong>${works.length} isolated</strong></div></div></div><div class="hero-aside"><a class="subtle-link" href="#quests">← All Quests</a><div class="quest-progress"><div class="row-head"><strong>Quest progress</strong><span class="number">${pct(quest)}%</span></div>${bar(pct(quest))}<small>${tasks.filter((t) => t.state === "COMPLETED").length} / ${tasks.length} tasks completed</small></div></div></section>${questChain(quest)}<nav class="tabs" aria-label="Quest sections">${tabs.map((name) => `<a href="#quest/${id}/${name}" class="${tab === name ? "active" : ""}" ${tab === name ? 'aria-current="page"' : ""}>${name[0].toUpperCase() + name.slice(1)}</a>`).join("")}</nav>${body}`;
 }
 function render() {
   if (!state) return;
   const [route = "home", id, tab] = (location.hash.slice(1) || "home").split(
     "/",
   );
-  document
-    .querySelectorAll("[data-nav]")
-    .forEach((el) =>
-      el.classList.toggle(
-        "active",
-        el.dataset.nav === (route === "quest" ? "quests" : route),
-      ),
-    );
+  document.querySelectorAll("[data-nav]").forEach((el) => {
+    const selected = el.dataset.nav === (route === "quest" ? "quests" : route);
+    el.classList.toggle("active", selected);
+    if (selected) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
+  });
   $("#breadcrumb").textContent = labels[route] || "Overview";
   $("#quest-count").textContent = state.quests.length;
+  const sprint = state.quests.find((q) => q.sprint)?.sprint;
+  const sprintQuests = state.quests.filter(
+    (q) => sprint && q.sprint === sprint,
+  );
+  const completed = sprintQuests.filter(
+    (q) => q.state === "PRS_CREATED",
+  ).length;
+  $("#sidebar-sprint").innerHTML =
+    `<div class="eyebrow">${icon("sword")} CURRENT SPRINT</div><strong>${esc(sprint || "No sprint assigned")}</strong>${bar(sprintQuests.length ? Math.round((completed / sprintQuests.length) * 100) : 0)}<small>${completed} / ${sprintQuests.length} Quests complete</small>`;
   // Preserve unsent agent instructions across live state updates.
   const selections = [...document.querySelectorAll("#main select")].map(
     (el) => ({
@@ -482,7 +624,12 @@ function render() {
               "Repositories",
               "Give each Quest an isolated place to build.",
               button("+ Add repository", "add-repository", {}, "primary"),
-            ) + panel("Repository registry", repoTable())
+            ) +
+            panel(
+              `${icon("repository")} <span>Repository registry<small>Manage the code repositories available to your Quests.</small></span>`,
+              repoTable(),
+              `<span class="panel-count">${state.repositories.length} ${state.repositories.length === 1 ? "repository" : "repositories"}</span>`,
+            )
           : route === "agents"
             ? agents()
             : route === "jira"
@@ -562,6 +709,11 @@ document.addEventListener("change", (event) => {
       .forEach((el) => (el.hidden = el.dataset.source !== event.target.value));
 });
 document.addEventListener("click", async (event) => {
+  if (event.target.closest(".skip-link")) {
+    event.preventDefault();
+    $("#main").focus();
+    return;
+  }
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const type = target.dataset.action;
@@ -686,6 +838,9 @@ document.addEventListener("submit", async (event) => {
   }
 });
 window.addEventListener("hashchange", render);
+document.querySelectorAll("[data-icon]").forEach((el) => {
+  el.innerHTML = icon(el.dataset.icon);
+});
 $("#today").textContent = new Date().toLocaleDateString("en-GB", {
   day: "numeric",
   month: "short",

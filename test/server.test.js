@@ -33,6 +33,13 @@ test("loopback API rejects foreign origins, spoofed hosts, missing token and arb
       .includes("frame-ancestors 'none'"),
   );
   assert.ok((await page.text()).includes("DevQuest"));
+  const art = await fetch(`${app.url}/devquest/backgrounds/midnight-reach.png`);
+  assert.equal(art.status, 200);
+  assert.match(art.headers.get("content-type"), /^image\/png/);
+  assert.deepEqual(
+    [...new Uint8Array(await art.arrayBuffer()).slice(0, 4)],
+    [137, 80, 78, 71],
+  );
   const foreign = await fetch(`${app.url}/api/state`, {
     headers: { Origin: "https://malicious.example" },
   });
