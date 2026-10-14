@@ -1,0 +1,5 @@
+{
+  "sourceControl": { "reviewers": ["replace-with-github-username"] },
+  "googleChat": { "webhookEnv": "DEVQUEST_GOOGLE_CHAT_WEBHOOK" },
+  "testing": { "credentialEnv": [] }
+}

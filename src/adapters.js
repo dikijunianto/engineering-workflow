@@ -1,8 +1,18 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readFile, readlink, realpath, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import {
+  glob,
+  lstat,
+  mkdtemp,
+  readFile,
+  readlink,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 const DIFF_LIMIT = 200_000;
@@ -55,7 +65,7 @@ function stopProcessTree(child) {
   }
 }
 
-export function runProcess(
+export async function runProcess(
   file,
   args,
   {
@@ -67,12 +77,40 @@ export function runProcess(
     onStdout,
     onStderr,
     onSpawn,
+    env: extraEnv,
   } = {},
 ) {
+  if (cwd) {
+    let directory;
+    try {
+      directory = await stat(cwd);
+    } catch {
+      throw new Error(
+        `Working directory is unavailable: ${cwd}. Repair the repository path in Repositories.`,
+      );
+    }
+    if (!directory.isDirectory())
+      throw new Error(`Working directory is not a folder: ${cwd}`);
+  }
   if (signal?.aborted) return Promise.reject(abortError());
   return new Promise((resolve, reject) => {
     // A test runner's child marker must not suppress tests inside a target repository.
-    const env = { ...process.env };
+    const env = { ...process.env, ...extraEnv };
+    const searchPath =
+      extraEnv?.PATH ?? process.env.PATH ?? process.env.Path ?? "";
+    for (const key of Object.keys(env))
+      if (key.toUpperCase() === "PATH") delete env[key];
+    // Desktop launches often omit Homebrew and native CLI installation folders.
+    env.PATH = [
+      ...new Set([
+        ...searchPath.split(path.delimiter).filter(Boolean),
+        path.dirname(process.execPath),
+        path.join(homedir(), ".local", "bin"),
+        ...(process.platform === "darwin"
+          ? ["/opt/homebrew/bin", "/usr/local/bin"]
+          : []),
+      ]),
+    ].join(path.delimiter);
     delete env.NODE_TEST_CONTEXT;
     const child = spawn(file, args, {
       cwd,
@@ -170,8 +208,9 @@ function inside(root, target) {
 }
 
 class GitAdapter {
-  constructor({ runner = runProcess } = {}) {
+  constructor({ runner = runProcess, testEnv = {} } = {}) {
     this.runner = runner;
+    this.testEnv = testEnv;
     this.repositories = new Map();
   }
 
@@ -180,14 +219,18 @@ class GitAdapter {
       this.runner,
       "git",
       ["rev-parse", "--show-toplevel"],
-      { cwd: target },
+      {
+        cwd: target,
+      },
     );
     const root = await realpath(rootText);
     const commonText = await checked(
       this.runner,
       "git",
       ["rev-parse", "--git-common-dir"],
-      { cwd: target },
+      {
+        cwd: target,
+      },
     );
     const common = await realpath(path.resolve(target, commonText));
     return { root, common };
@@ -208,7 +251,9 @@ class GitAdapter {
     const remoteResult = await this.runner(
       "git",
       ["config", "--get", "remote.origin.url"],
-      { cwd: requested },
+      {
+        cwd: requested,
+      },
     );
     if (![0, 1].includes(remoteResult.code))
       throw commandError(
@@ -260,6 +305,18 @@ class GitAdapter {
           ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
           branchResult,
         );
+      try {
+        await checked(
+          this.runner,
+          "git",
+          ["rev-parse", "--verify", `${baseBranch}^{commit}`],
+          { cwd: registered.canonical },
+        );
+      } catch {
+        throw new Error(
+          `Base branch ${baseBranch} is unavailable. Fetch or create the correct local ${baseBranch} branch, then retry execution.`,
+        );
+      }
       await checked(
         this.runner,
         "git",
@@ -295,7 +352,9 @@ class GitAdapter {
       this.runner,
       "git",
       ["branch", "--show-current"],
-      { cwd: target },
+      {
+        cwd: target,
+      },
     );
     if (actualBranch !== branch)
       throw new Error(
@@ -308,7 +367,7 @@ class GitAdapter {
     };
   }
 
-  async #fingerprint(root, head, statusText) {
+  async #fingerprint(root, head, statusText, baseHead) {
     const staged = await checked(
       this.runner,
       "git",
@@ -352,7 +411,9 @@ class GitAdapter {
     return {
       contentFingerprint,
       fingerprint: createHash("sha256")
-        .update(`${head}\0${statusText}\0${staged}\0${contentFingerprint}`)
+        .update(
+          `${head}\0${baseHead}\0${statusText}\0${staged}\0${contentFingerprint}`,
+        )
         .digest("hex"),
     };
   }
@@ -374,13 +435,19 @@ class GitAdapter {
     const statusText = await checked(
       this.runner,
       "git",
-      ["status", "--porcelain=v1", "-z"],
+      ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
       { cwd: root, maxOutput: 2_000_000 },
+    );
+    const baseHead = await checked(
+      this.runner,
+      "git",
+      ["rev-parse", "development"],
+      { cwd: root },
     );
     const trackedDiff = await checked(
       this.runner,
       "git",
-      ["diff", "--no-ext-diff", "--binary", "development"],
+      ["diff", "--no-ext-diff", "--binary", baseHead],
       {
         cwd: root,
         maxOutput: DIFF_LIMIT,
@@ -404,9 +471,15 @@ class GitAdapter {
         if (error.code !== "ENOENT") throw error;
       }
     }
-    const fingerprints = await this.#fingerprint(root, head, statusText);
+    const fingerprints = await this.#fingerprint(
+      root,
+      head,
+      statusText,
+      baseHead,
+    );
     return {
       head,
+      baseHead,
       branch,
       dirty: statusText.length > 0,
       diff: bounded(
@@ -450,18 +523,28 @@ class GitAdapter {
     try {
       result = await this.runner(command[0], command[1], {
         cwd: await realpath(assertNarrowPath(target)),
+        env: this.testEnv,
         timeoutMs: 300_000,
         maxOutput: 20_000,
       });
     } catch (error) {
-      return { passed: false, summary: bounded(error.message, SUMMARY_LIMIT) };
+      return {
+        passed: false,
+        summary: bounded(redact(error.message, this.testEnv), SUMMARY_LIMIT),
+      };
     }
     return {
       passed:
         result.code === 0 &&
-        !(profile === "node-test" && /# tests 0\b/.test(result.stdout)),
+        !(
+          ["node-test", "npm-test"].includes(profile) &&
+          /(?:#|ℹ) tests 0\b/.test(result.stdout)
+        ),
       summary: bounded(
-        [result.stdout, result.stderr].filter(Boolean).join("\n").trim(),
+        redact(
+          [result.stdout, result.stderr].filter(Boolean).join("\n").trim(),
+          this.testEnv,
+        ),
         SUMMARY_LIMIT,
       ),
     };
@@ -484,17 +567,27 @@ class GitAdapter {
   }
 }
 
+function redact(value, env) {
+  let result = String(value ?? "");
+  for (const secret of Object.values(env)) {
+    if (secret) result = result.replaceAll(secret, "[REDACTED]");
+  }
+  return result;
+}
+
 export class AgentRuntime {
   constructor({
     name,
     executable,
     runner = runProcess,
     persistence = false,
+    env = {},
   } = {}) {
     this.name = name;
     this.executable = executable;
     this.runner = runner;
     this.persistence = persistence;
+    this.env = env;
     this.capabilities = null;
     this.help = "";
     this.resumeHelp = "";
@@ -586,12 +679,17 @@ export class AgentRuntime {
     signal,
     readOnly = false,
     sessionId,
+    mcpConfig,
+    mcpTools,
+    timeoutMs = 60 * 60_000,
   } = {}) {
     const capabilities = await this.detectCapabilities();
     if (!capabilities.available) throw new Error(capabilities.reason);
     if (signal?.aborted) throw abortError();
     const args = this.buildArgs({
       readOnly,
+      mcpConfig,
+      mcpTools,
       sessionId: capabilities.nativeResume ? sessionId : undefined,
     });
     let buffer = "";
@@ -610,6 +708,8 @@ export class AgentRuntime {
         parsed = line;
       }
       const event = this.parseEvent(parsed);
+      if (event.text) event.text = redact(event.text, this.env);
+      if (event.error) event.error = redact(event.error, this.env);
       if (event.text) {
         parsedText = bounded(
           `${parsedText}${parsedText ? "\n" : ""}${event.text}`,
@@ -635,9 +735,10 @@ export class AgentRuntime {
     };
     const result = await this.runner(this.executable, args, {
       cwd,
+      env: this.env,
       input: `${String(prompt ?? "")}\n\nIf a human decision or permission is needed, begin your final response with DEVQUEST_WAITING_INPUT and ask the question. Do not claim implementation is complete while blocked.`,
       signal,
-      timeoutMs: 60 * 60_000,
+      timeoutMs,
       maxOutput: OUTPUT_LIMIT,
       onStdout,
       onSpawn: (pid) => onEvent?.({ type: "process", pid }),
@@ -655,9 +756,14 @@ export class AgentRuntime {
         type: "output",
         text: "Native session is unavailable. Continuing logically from checkpoint.\n",
       });
-      return this.start({ cwd, prompt, onEvent, signal, readOnly });
+      return this.start({ cwd, prompt, onEvent, signal, readOnly, timeoutMs });
     }
-    if (result.code !== 0) throw commandError(this.executable, args, result);
+    if (result.code !== 0)
+      throw commandError(this.executable, args, {
+        ...result,
+        stderr: redact(result.stderr, this.env),
+        stdout: redact(result.stdout, this.env),
+      });
     if (failure) throw new Error(failure);
     const text = bounded(
       resultText || parsedText || (waitingInput ? "Agent requires input." : ""),
@@ -762,6 +868,7 @@ export class ClaudeCodeRuntime extends AgentRuntime {
       "--print",
       "--output-format",
       "--permission-mode",
+      "--allowedTools",
       "--tools",
       "--strict-mcp-config",
       "--mcp-config",
@@ -769,20 +876,36 @@ export class ClaudeCodeRuntime extends AgentRuntime {
     ];
   }
 
-  buildArgs({ readOnly, sessionId }) {
+  buildArgs({ readOnly, sessionId, mcpConfig, mcpTools }) {
     if (readOnly && !this.help.includes("--permission-mode")) {
       throw new Error(
-        "Installed Claude Code CLI cannot enforce read-only plan mode",
+        "Installed Claude Code CLI lacks permission-mode support",
       );
     }
     const args = ["--print", "--output-format", "stream-json", "--verbose"];
     if (!this.persistence) args.push("--no-session-persistence");
-    args.push("--permission-mode", readOnly ? "plan" : "acceptEdits");
+    args.push(
+      "--permission-mode",
+      mcpConfig || readOnly ? "dontAsk" : "acceptEdits",
+    );
     args.push(
       "--tools",
-      readOnly ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write",
+      mcpConfig
+        ? "Read"
+        : readOnly
+          ? "Read,Glob,Grep"
+          : "Read,Glob,Grep,Edit,Write",
     );
-    args.push("--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}');
+    args.push(
+      "--strict-mcp-config",
+      "--mcp-config",
+      mcpConfig || '{"mcpServers":{}}',
+    );
+    if (mcpConfig || readOnly)
+      args.push(
+        "--allowedTools",
+        mcpConfig ? ["Read", ...mcpTools].join(",") : "Read,Glob,Grep",
+      );
     if (sessionId) args.push("--resume", sessionId);
     return args;
   }
@@ -817,17 +940,161 @@ export class ClaudeCodeRuntime extends AgentRuntime {
 }
 
 export class SkillRunner {
-  constructor({ bridge, runner = runProcess } = {}) {
+  constructor({
+    bridge,
+    runner = runProcess,
+    runtime,
+    mcpConfigPath,
+    mcpServer = "atlassian",
+  } = {}) {
     this.bridge = bridge;
     this.runner = runner;
+    this.runtime = runtime;
+    this.mcpConfigPath = mcpConfigPath;
+    this.mcpServer = mcpServer;
   }
 
-  async publish({ quest, tasks, planPath }) {
-    if (!this.bridge?.executable) {
-      throw new Error(
-        "Configure an existing Jira skill bridge executable and arguments before publishing",
-      );
+  close() {
+    this.closed = true;
+    this.controller?.abort();
+  }
+
+  async #direct(name, input) {
+    const file = input.skillPaths?.[name];
+    if (!/^[a-zA-Z0-9_-]+$/.test(this.mcpServer))
+      throw new Error("Invalid Jira MCP server name");
+    if (!file || !this.runtime)
+      throw new Error(`Configure the local ${name} skill path and Claude Code`);
+    const skill = await readFile(file, "utf8");
+    if (skill.length > 100000)
+      throw new Error("Local skill exceeds 100,000 characters");
+    let server;
+    try {
+      server = JSON.parse(await readFile(this.mcpConfigPath, "utf8"))
+        .mcpServers?.[this.mcpServer];
+    } catch {
+      throw new Error("Configure Claude Code's Atlassian MCP connection first");
     }
+    if (!server)
+      throw new Error("Configure Claude Code's Atlassian MCP connection first");
+    const directory = await mkdtemp(path.join(tmpdir(), "devquest-jira-"));
+    const mcpConfig = path.join(directory, "mcp.json");
+    this.controller = new AbortController();
+    const methods = [
+      "getAccessibleAtlassianResources",
+      "getVisibleJiraProjects",
+      "getJiraProjectIssueTypesMetadata",
+      "getJiraIssueTypeMetaWithFields",
+      "getJiraIssue",
+      "lookupJiraAccountId",
+      "searchJiraIssuesUsingJql",
+    ];
+    if (name === "upload") methods.push("createJiraIssue");
+    try {
+      await writeFile(
+        mcpConfig,
+        JSON.stringify({ mcpServers: { [this.mcpServer]: server } }),
+        {
+          mode: 0o600,
+        },
+      );
+      const output =
+        name === "appendix"
+          ? '{"content":"complete weighted Markdown appendix"}'
+          : '{"results":[{"taskId":"provided execution task UUID","key":"actual Jira key","url":"actual issue URL","complete":false}]}';
+      if (this.closed) throw abortError();
+      const result = await this.runtime.start({
+        cwd: path.dirname(input.planPath),
+        readOnly: true,
+        signal: this.controller.signal,
+        timeoutMs: 120000,
+        mcpConfig,
+        mcpTools: methods.map((method) => `mcp__${this.mcpServer}__${method}`),
+        prompt: `Use this local skill: ${file}\n${skill}\nApplication input:\n${JSON.stringify(input)}\nUse the configured MCP server ${this.mcpServer}; tool prefixes in the skill may differ. Resolve the actual tenant through this connection; do not use another developer's cached memory path. The approved plan is the only source of work. Read it and the appendix when supplied. ${name === "upload" ? "Publish only the provided tasks, never the whole backlog. Create at most maxIssues actual Jira issues from the application input. Preserve any existing task.jira.issues mappings; search and verify existing issues before creation to recover an interrupted request using the stable idempotency key. This button authorizes this sample or this batch only; return after verifying the created issues. Return every verified issue mapping, with complete=false while any appendix issues for that execution task remain uncreated. Set complete=true only after verifying all its issues. Keep issue descriptions tied to the stable execution-task idempotency key for recovery." : "Only read Jira metadata; do not create issues. Return the appendix in your response; do not write files."} Return only JSON ${output}. Do not commit, push or merge. If required input is missing, return JSON {"waitingInput":true,"question":"what is missing","results":[]} and stop.`,
+      });
+      let parsed;
+      try {
+        parsed = JSON.parse(
+          result.text
+            .trim()
+            .replace(/^DEVQUEST_WAITING_INPUT\s*/, "")
+            .replace(/^```(?:json)?\s*/, "")
+            .replace(/\s*```$/, ""),
+        );
+      } catch {
+        throw new Error(
+          "Local Jira skill did not return structured results; inspect the skill output and retry",
+        );
+      }
+      if (
+        (parsed.waitingInput || result.waitingInput) &&
+        !parsed.results?.length
+      )
+        throw new Error(
+          String(parsed.question || "Local Jira skill needs input").slice(
+            0,
+            1000,
+          ),
+        );
+      return parsed;
+    } finally {
+      this.controller = null;
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  async appendix(input) {
+    if (!this.bridge?.executable) {
+      const parsed = await this.#direct("appendix", input);
+      if (
+        typeof parsed.content !== "string" ||
+        !parsed.content.trim() ||
+        parsed.content.length > 100000
+      )
+        throw new Error("Jira appendix generation failed");
+      return parsed.content;
+    }
+    const result = await this.runner(
+      this.bridge.executable,
+      this.bridge.args ?? [],
+      {
+        input: JSON.stringify({ ...input, operation: "generate-appendix" }),
+        timeoutMs: 120000,
+        maxOutput: 110000,
+      },
+    );
+    let parsed;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      throw new Error("Jira appendix bridge returned invalid JSON");
+    }
+    if (parsed.waitingInput)
+      throw new Error(
+        String(parsed.question || "Jira appendix needs more input").slice(
+          0,
+          1000,
+        ),
+      );
+    if (
+      result.code !== 0 ||
+      typeof parsed.content !== "string" ||
+      !parsed.content.trim() ||
+      parsed.content.length > 100000
+    )
+      throw new Error("Jira appendix generation failed");
+    return parsed.content;
+  }
+
+  async publish({
+    quest,
+    tasks,
+    planPath,
+    appendixPath,
+    skillPaths,
+    publicationPhase,
+    maxIssues,
+  }) {
     const normalizedTasks = tasks.map((task) => {
       if (!task.id)
         throw new Error("Every Jira task requires a stable task id");
@@ -837,11 +1104,42 @@ export class SkillRunner {
         idempotencyKey: `devquest:${quest.id}:${task.id}`,
       };
     });
+    if (!this.bridge?.executable) {
+      const parsed = await this.#direct("upload", {
+        quest,
+        tasks: normalizedTasks,
+        planPath,
+        appendixPath,
+        skillPaths,
+        publicationPhase,
+        maxIssues,
+      });
+      if (!Array.isArray(parsed.results))
+        throw new Error("Local Jira skill returned invalid mappings");
+      const allowed = new Set(normalizedTasks.map((task) => task.taskId));
+      return parsed.results
+        .filter(
+          (item) =>
+            item &&
+            allowed.has(item.taskId) &&
+            /^[A-Z][A-Z0-9_]*-\d+$/.test(item.key),
+        )
+        .map((item) => ({ ...item, complete: item.complete === true }));
+    }
     const result = await this.runner(
       this.bridge.executable,
       this.bridge.args ?? [],
       {
-        input: JSON.stringify({ quest, tasks: normalizedTasks, planPath }),
+        input: JSON.stringify({
+          operation: "publish",
+          quest,
+          tasks: normalizedTasks,
+          planPath,
+          appendixPath,
+          skillPaths,
+          publicationPhase,
+          maxIssues,
+        }),
         timeoutMs: 120_000,
         maxOutput: 100_000,
       },
@@ -865,9 +1163,10 @@ export class SkillRunner {
           typeof item.key === "string" &&
           item.key.length,
       )
-      .map(({ taskId, key, url }) => ({
+      .map(({ taskId, key, url, complete }) => ({
         taskId,
         key,
+        ...(typeof complete === "boolean" ? { complete } : {}),
         ...(url ? { url } : {}),
       }));
     if (result.code !== 0 && published.length === 0)
@@ -1139,11 +1438,103 @@ export class SourceControlProvider {
   }
 }
 
+export class GoogleChatWebhook {
+  constructor({ webhookEnv, fetch = globalThis.fetch } = {}) {
+    this.webhookEnv = webhookEnv;
+    this.fetch = fetch;
+  }
+  async send({ text, requestId }) {
+    const raw = this.webhookEnv && process.env[this.webhookEnv];
+    if (!raw)
+      throw new Error("Configure the Google Chat webhook environment variable");
+    let url;
+    try {
+      url = new URL(raw);
+    } catch {
+      throw new Error("Invalid Google Chat webhook configuration");
+    }
+    if (
+      url.protocol !== "https:" ||
+      url.host !== "chat.googleapis.com" ||
+      !/^\/v1\/spaces\/[^/]+\/messages$/.test(url.pathname) ||
+      url.username ||
+      url.password
+    )
+      throw new Error("Use an HTTPS Google Chat incoming webhook");
+    url.searchParams.set("requestId", requestId);
+    let response;
+    try {
+      response = await this.fetch(url, {
+        method: "POST",
+        redirect: "error",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+        signal: AbortSignal.timeout(15000),
+      });
+    } catch {
+      throw new Error(
+        "Google Chat delivery was not confirmed; retry the saved request",
+      );
+    }
+    if (!response.ok)
+      throw new Error(`Google Chat delivery failed (HTTP ${response.status})`);
+    let result;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error(
+        "Google Chat delivery was not confirmed; retry the saved request",
+      );
+    }
+    if (!result.name)
+      throw new Error(
+        "Google Chat returned no message receipt; retry the saved request",
+      );
+    return { name: result.name };
+  }
+}
+
 export class GitHubProvider extends SourceControlProvider {
   constructor({ runner = runProcess, git } = {}) {
     super();
     this.runner = runner;
     this.git = git;
+  }
+
+  async requestReview({ path: cwd, number, reviewers }) {
+    if (
+      !Array.isArray(reviewers) ||
+      !reviewers.length ||
+      reviewers.some(
+        (name) => !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/.test(name),
+      )
+    )
+      throw new Error("Provide GitHub reviewer usernames");
+    await checked(
+      this.runner,
+      "gh",
+      ["pr", "edit", String(number), "--add-reviewer", reviewers.join(",")],
+      { cwd },
+    );
+    const result = JSON.parse(
+      await checked(
+        this.runner,
+        "gh",
+        ["pr", "view", String(number), "--json", "reviewRequests"],
+        {
+          cwd,
+        },
+      ),
+    );
+    const requested = new Set(
+      (result.reviewRequests || []).map((reviewer) =>
+        reviewer.login?.toLowerCase(),
+      ),
+    );
+    if (reviewers.some((name) => !requested.has(name.toLowerCase())))
+      throw new Error(
+        "Reviewer assignment was not confirmed; retry the review request",
+      );
   }
 
   async #find(cwd, branch, baseBranch) {
@@ -1159,7 +1550,7 @@ export class GitHubProvider extends SourceControlProvider {
         "--state",
         "open",
         "--json",
-        "number,url",
+        "number,url,headRefOid",
         "--limit",
         "1",
       ],
@@ -1174,7 +1565,13 @@ export class GitHubProvider extends SourceControlProvider {
         "gh returned invalid JSON while looking up pull requests",
       );
     }
-    return prs[0] ? { url: prs[0].url, number: Number(prs[0].number) } : null;
+    return prs[0]
+      ? {
+          url: prs[0].url,
+          number: Number(prs[0].number),
+          head: prs[0].headRefOid,
+        }
+      : null;
   }
 
   async create({
@@ -1187,7 +1584,17 @@ export class GitHubProvider extends SourceControlProvider {
   }) {
     await this.git?.reconcile({ repoPath, path: worktreePath, branch });
     const existing = await this.#find(worktreePath, branch, baseBranch);
-    if (existing) return existing;
+    const head = await checked(this.runner, "git", ["rev-parse", "HEAD"], {
+      cwd: worktreePath,
+    });
+    const verified = (pr) => {
+      if (!pr || pr.head !== head)
+        throw new Error(
+          "PR does not contain the reviewed commit; retry publication",
+        );
+      return { url: pr.url, number: pr.number };
+    };
+    if (existing?.head === head) return verified(existing);
     await checked(
       this.runner,
       "git",
@@ -1198,6 +1605,8 @@ export class GitHubProvider extends SourceControlProvider {
         maxOutput: 20_000,
       },
     );
+    if (existing)
+      return verified(await this.#find(worktreePath, branch, baseBranch));
     let creation;
     try {
       creation = await this.runner(
@@ -1219,30 +1628,83 @@ export class GitHubProvider extends SourceControlProvider {
     } catch {
       creation = { code: 1, stdout: "", stderr: "gh invocation failed" };
     }
-    const match = /https:\/\/\S+\/pull\/(\d+)/.exec(creation.stdout ?? "");
-    if (creation.code === 0 && match)
-      return { url: match[0], number: Number(match[1]) };
     const recovered = await this.#find(worktreePath, branch, baseBranch);
-    if (recovered) return recovered;
+    if (recovered) return verified(recovered);
     throw commandError("gh", ["pr", "create"], creation);
   }
 }
 
 export async function createAdapters(config = {}) {
   const runner = config.runner ?? config.processRunner ?? runProcess;
-  const git = new GitAdapter({ runner });
+  const testEnv = {};
+  for (const name of config.testing?.credentialEnv || []) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || !process.env[name])
+      throw new Error(`Missing test credential environment variable: ${name}`);
+    testEnv[name] = process.env[name];
+  }
+  const skillPaths = { ...config.workflow?.skills };
+  for (const [name, folder] of Object.entries({
+    appendix: "create-appendix-task-list",
+    upload: "upload-task-to-jira",
+    commit: "commit-message-creator",
+  })) {
+    const file = path.join(homedir(), ".claude", "skills", folder, "SKILL.md");
+    if (!skillPaths[name] && (await exists(file))) skillPaths[name] = file;
+  }
+  for (const [name, folder] of Object.entries({
+    brainstorming: "brainstorming",
+    planning: "writing-plans",
+    implementation: "executing-plans",
+  })) {
+    if (skillPaths[name]) continue;
+    const files = [];
+    for await (const file of glob(
+      path.join(
+        homedir(),
+        ".claude/plugins/cache/*/superpowers/*/skills",
+        folder,
+        "SKILL.md",
+      ),
+    ))
+      files.push(file);
+    files.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+    if (files.length) skillPaths[name] = files.at(-1);
+  }
+  config = { ...config, workflow: { ...config.workflow, skills: skillPaths } };
+  const runtimes = {
+    codex: new CodexRuntime({
+      runner,
+      env: testEnv,
+      ...(config.runtimes?.codex ?? {}),
+    }),
+    claude: new ClaudeCodeRuntime({
+      runner,
+      env: testEnv,
+      ...(config.runtimes?.claude ?? {}),
+    }),
+  };
+  const git = new GitAdapter({ runner, testEnv });
   return {
     config,
     git,
-    runtimes: {
-      codex: new CodexRuntime({ runner, ...(config.runtimes?.codex ?? {}) }),
-      claude: new ClaudeCodeRuntime({
-        runner,
-        ...(config.runtimes?.claude ?? {}),
-      }),
+    workflow: {
+      async instructions(name) {
+        const file = skillPaths[name];
+        if (!file) return "";
+        const content = await readFile(file, "utf8");
+        if (content.length > 100000)
+          throw new Error("Local skill exceeds 100,000 characters");
+        return `Local skill (${file}):\n${content}\nDevQuest constraints: return the requested artifact in this turn. Use the existing worktree. Do not commit, push, merge, or publish external records. Application actions own publication and approvals.`;
+      },
     },
+    chat: new GoogleChatWebhook({ ...config.googleChat, fetch: config.fetch }),
+    runtimes,
     skill: new SkillRunner({
       runner,
+      runtime: runtimes.claude,
+      mcpConfigPath:
+        config.workflow?.jiraMcpConfig || path.join(homedir(), ".claude.json"),
+      mcpServer: config.workflow?.jiraMcpServer || "atlassian",
       bridge:
         config.skill?.bridge ?? config.jiraSkill?.bridge ?? config.jiraSkill,
     }),

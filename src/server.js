@@ -12,6 +12,10 @@ const publicDir = fileURLToPath(new URL("../public/", import.meta.url));
 const assets = new Map([
   ["/", ["index.html", "text/html"]],
   ["/app.js", ["app.js", "text/javascript"]],
+  [
+    "/vendor/marked.js",
+    ["../node_modules/marked/lib/marked.esm.js", "text/javascript"],
+  ],
   ["/style.css", ["style.css", "text/css"]],
   [
     "/devquest/backgrounds/midnight-reach.png",
@@ -104,13 +108,14 @@ export async function createServer({
     for (const client of clients)
       client.write(`data: ${JSON.stringify(event)}\n\n`);
   };
-  const engine = new Engine({
-    store,
-    adapters: adapters || (await createAdapters(config)),
-    emit,
-    concurrency: config.concurrency,
-  });
+  let engine;
   try {
+    engine = new Engine({
+      store,
+      adapters: adapters || (await createAdapters(config)),
+      emit,
+      concurrency: config.concurrency,
+    });
     await engine.initialize();
   } catch (error) {
     store.close();
@@ -143,6 +148,23 @@ export async function createServer({
         return json(response, 200, { token });
       if (request.method === "GET" && url.pathname === "/api/state")
         return json(response, 200, engine.snapshot());
+      if (
+        request.method === "GET" &&
+        url.pathname.startsWith("/api/artifacts/")
+      ) {
+        const artifact = store.get(
+          "artifacts",
+          url.pathname.slice("/api/artifacts/".length),
+        );
+        if (!artifact)
+          return json(response, 404, { error: "Artifact not found" });
+        const content = store.content(artifact);
+        response.writeHead(200, {
+          "Content-Type": "text/markdown; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${artifact.kind}-r${artifact.revision}.md"`,
+        });
+        return response.end(content);
+      }
       if (request.method === "GET" && url.pathname === "/api/events") {
         response.writeHead(200, {
           "Content-Type": "text/event-stream",

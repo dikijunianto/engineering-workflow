@@ -556,6 +556,36 @@ p {
 .panel-head h2 > .icon {
   color: var(--blue);
 }
+.architect-document > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.architect-document > summary::-webkit-details-marker {
+  display: none;
+}
+.architect-document:not([open]) > summary {
+  border-bottom: 0;
+}
+.disclosure-label {
+  color: var(--blue);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.architect-document .collapse-label,
+.architect-document[open] .expand-label {
+  display: none;
+}
+.architect-document[open] .collapse-label {
+  display: inline;
+}
+.architect-document > .toolbar {
+  margin: 0;
+  padding: 12px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.architect-document > .toolbar :is(select, .btn) {
+  height: 34px;
+}
 .panel-head small {
   font-weight: 400;
   margin-top: 3px;
@@ -1236,6 +1266,87 @@ tbody tr:hover {
   font-family: inherit;
   max-height: 230px;
   font-size: 14px;
+}
+.document-view-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+.architect-document .document-view-label select {
+  width: 180px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.document-views[data-view="viewer"] .markdown-source,
+.document-views[data-view="source"] .markdown-view {
+  display: none;
+}
+.markdown-view {
+  font-family: inherit;
+  font-size: 14px;
+  color: var(--text);
+  white-space: normal;
+}
+.markdown-view :is(h1, h2, h3, h4, h5, h6) {
+  margin: 24px 0 12px;
+  line-height: 1.4;
+}
+.markdown-view > :first-child {
+  margin-top: 0;
+}
+.markdown-view p {
+  margin: 12px 0;
+}
+.markdown-view :is(ul, ol) {
+  padding-left: 24px;
+  margin: 12px 0;
+}
+.markdown-view li {
+  margin: 4px 0;
+}
+.markdown-view a {
+  color: var(--blue);
+  text-decoration: underline;
+}
+.markdown-view code {
+  font-family: var(--mono);
+  background: #0003;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.markdown-view pre {
+  white-space: pre;
+  overflow-x: auto;
+  padding: 16px;
+  background: #0003;
+  border-radius: 6px;
+}
+.markdown-view pre code {
+  padding: 0;
+  background: none;
+}
+.markdown-view blockquote {
+  margin: 16px 0;
+  padding: 0 16px;
+  border-left: 3px solid var(--blue);
+  color: var(--secondary);
+}
+.markdown-view table {
+  border-collapse: collapse;
+  display: block;
+  overflow-x: auto;
+}
+.markdown-view :is(th, td) {
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+}
+.markdown-view hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 20px 0;
 }
 .source-list {
   padding: 18px;

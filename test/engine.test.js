@@ -30,7 +30,9 @@ export async function fixture(t, { realGit = false } = {}) {
         options.signal?.addEventListener(
           "abort",
           () => reject(new Error("Aborted")),
-          { once: true },
+          {
+            once: true,
+          },
         );
       }),
   };
@@ -218,6 +220,157 @@ test("human gates cannot be bypassed and approvals bind document revisions", asy
     /revision changed/,
   );
 });
+test("existing QA issue skips Jira creation and unlocks approved implementation", async (t) => {
+  const f = await fixture(t);
+  f.adapters.skill.publish = () => {
+    throw new Error("Must not publish Jira");
+  };
+  const input = {
+    questId: f.quest.id,
+    key: "qa-123",
+    url: "https://team.atlassian.net/browse/QA-123",
+  };
+  await assert.rejects(f.engine.action("USE_EXISTING_JIRA", input), /Approve/);
+  await f.plan();
+  input.planArtifactId = f.store.latest(f.quest.id, "plan").id;
+  await assert.rejects(
+    f.engine.action("USE_EXISTING_JIRA", { ...input, planArtifactId: "old" }),
+    /revision changed/,
+  );
+  for (const invalid of [
+    { key: "bad" },
+    { url: "javascript:alert(1)" },
+    { url: "https://user:secret@example.com" },
+  ])
+    await assert.rejects(
+      f.engine.action("USE_EXISTING_JIRA", { ...input, ...invalid }),
+      /Jira issue|HTTPS/,
+    );
+  assert.ok(f.engine.tasks(f.quest.id).every((task) => !task.jira));
+  await f.engine.action("USE_EXISTING_JIRA", input);
+  assert.equal(f.store.get("quests", f.quest.id).state, "TASKS_PUBLISHED");
+  for (const task of f.engine.tasks(f.quest.id)) {
+    assert.equal(task.state, "PUBLISHED");
+    assert.equal(task.jira.key, "QA-123");
+    assert.equal(task.jira.complete, true);
+    assert.equal(task.jira.existing, true);
+  }
+  assert.equal(f.store.latest(f.quest.id, "appendix"), undefined);
+  const tickets = f.store.latest(f.quest.id, "ticket");
+  assert.match(f.store.content(tickets), /QA-123/);
+  assert.match(
+    readFileSync(
+      path.join(f.store.dir, "quests", f.quest.id, "ticket.md"),
+      "utf8",
+    ),
+    /Existing issue/,
+  );
+  await assert.rejects(
+    f.engine.action("SAVE_PLAN", { questId: f.quest.id, content: "Changed" }),
+    /Published/,
+  );
+  await f.engine.action("START_TASK", {
+    questId: f.quest.id,
+    taskId: f.engine.tasks(f.quest.id)[0].id,
+  });
+  assert.equal(f.pending.length, 1);
+});
+
+test("saved and generated specs preserve Markdown revisions and require plan review", async (t) => {
+  const f = await fixture(t);
+  await f.plan();
+  const trd = f.store.latest(f.quest.id, "trd");
+  await assert.rejects(
+    f.engine.action("SAVE_SPEC", {
+      questId: f.quest.id,
+      trdArtifactId: "old",
+      content: "# Spec",
+    }),
+    /TRD revision changed/,
+  );
+  await f.engine.action("SAVE_SPEC", {
+    questId: f.quest.id,
+    trdArtifactId: trd.id,
+    content: "# Spec\n\nAcceptance: preserve data.",
+  });
+  const first = f.store.latest(f.quest.id, "spec");
+  assert.equal(first.trdArtifactId, trd.id);
+  assert.equal(f.store.get("quests", f.quest.id).state, "PLAN_DRAFT");
+  assert.throws(() => f.engine.approved(f.quest.id, "plan"), /human approval/);
+  await f.engine.action("GENERATE_SPEC", { questId: f.quest.id });
+  await f.finish("# Revised spec\n\nAcceptance: preserve worktrees.");
+  const second = f.store.latest(f.quest.id, "spec");
+  assert.equal(second.revision, 2);
+  assert.match(f.store.content(first), /preserve data/);
+  assert.match(
+    readFileSync(
+      path.join(f.store.dir, "quests", f.quest.id, "spec.md"),
+      "utf8",
+    ),
+    /preserve worktrees/,
+  );
+  assert.match(f.engine.context(f.quest), /Revised spec/);
+  await f.approve("plan");
+  await f.publish();
+  await assert.rejects(
+    f.engine.action("GENERATE_SPEC", { questId: f.quest.id }),
+    /Published/,
+  );
+});
+
+test("failed initial worktree preparation retries the same work record", async (t) => {
+  const f = await fixture(t);
+  await f.plan();
+  await f.publish();
+  const task = f.engine.tasks(f.quest.id)[0];
+  const prepare = f.adapters.git.prepare;
+  let attempts = 0;
+  f.adapters.git.prepare = async (args) => {
+    attempts++;
+    if (attempts === 1)
+      throw new Error("Base branch development is unavailable");
+    return prepare(args);
+  };
+  await assert.rejects(f.engine.workFor(f.quest, task), /Base branch/);
+  const failed = f.engine.works(f.quest.id)[0];
+  assert.equal(failed.state, "RECOVERY_REQUIRED");
+  const recovered = await f.engine.workFor(f.quest, task);
+  assert.equal(attempts, 2);
+  assert.equal(recovered.id, failed.id);
+  assert.equal(recovered.state, "READY");
+  assert.equal(recovered.error, null);
+  assert.equal(f.engine.works(f.quest.id).length, 1);
+  f.store.put("works", { ...recovered, state: "RECOVERY_REQUIRED" });
+  await f.engine.reconcile();
+  assert.equal(f.engine.works(f.quest.id)[0].state, "READY");
+  f.store.put("runs", {
+    id: "prior-task-run",
+    workId: recovered.id,
+    questId: f.quest.id,
+    state: "FAILED",
+  });
+  f.store.put("works", { ...recovered, state: "RECOVERY_REQUIRED" });
+  f.facts.delete(recovered.path);
+  await assert.rejects(f.engine.workFor(f.quest, task), /missing worktree/);
+  assert.equal(attempts, 2, "Do not recreate a worktree after agent work");
+});
+
+test("existing Jira cannot replace partial publication", async (t) => {
+  const f = await fixture(t);
+  await f.plan();
+  const task = f.engine.tasks(f.quest.id)[0];
+  f.store.put("tasks", { ...task, jira: { key: "DEV-1", complete: false } });
+  await assert.rejects(
+    f.engine.action("USE_EXISTING_JIRA", {
+      questId: f.quest.id,
+      key: "QA-123",
+      planArtifactId: f.store.latest(f.quest.id, "plan").id,
+    }),
+    /Published/,
+  );
+  assert.equal(f.store.get("tasks", task.id).jira.key, "DEV-1");
+});
+
 test("cycles, missing dependencies and out-of-scope repositories are rejected", async (t) => {
   const f = await fixture(t);
   await f.plan();
@@ -325,12 +478,12 @@ test("failed tests prevent dependents and PR creation; raw test output is not re
   const f = await fixture(t);
   await f.plan();
   await f.publish();
+  const task = f.engine.tasks(f.quest.id)[0];
+  await f.engine.action("START_TASK", { questId: f.quest.id, taskId: task.id });
   f.adapters.git.test = async () => ({
     passed: false,
     summary: "raw secret output\n# tests 1\n# fail 1",
   });
-  const task = f.engine.tasks(f.quest.id)[0];
-  await f.engine.action("START_TASK", { questId: f.quest.id, taskId: task.id });
   await f.finish();
   assert.equal(f.store.get("tasks", task.id).state, "TEST_FAILED");
   assert.ok(
@@ -607,5 +760,250 @@ test("review is invalidated by changes during review or before PR creation", asy
   await assert.rejects(
     f.engine.action("CREATE_PR", { questId: f.quest.id, workId: work.id }),
     /Changes since review/,
+  );
+});
+
+test("baseline failures block agent execution without losing the task", async (t) => {
+  const f = await fixture(t);
+  await f.plan();
+  await f.publish();
+  f.adapters.git.test = async () => ({
+    passed: false,
+    summary: "Missing dependencies",
+  });
+  const task = f.engine.tasks(f.quest.id)[0];
+  await assert.rejects(
+    f.engine.action("START_TASK", { questId: f.quest.id, taskId: task.id }),
+    /Baseline tests failed/,
+  );
+  assert.equal(f.pending.length, 0);
+  assert.equal(f.store.get("tasks", task.id).state, "PUBLISHED");
+  f.adapters.git.test = async () => ({ passed: true, summary: "# tests 1" });
+  await f.engine.action("START_TASK", { questId: f.quest.id, taskId: task.id });
+  assert.equal(f.pending.length, 1);
+});
+
+test("appendix approval binds to the plan and publishing uses sample checkpoints", async (t) => {
+  const f = await fixture(t);
+  await f.plan();
+  f.adapters.config.workflow = {
+    skills: { appendix: "appendix.md", upload: "upload.md" },
+  };
+  await assert.rejects(f.publish(), /appendix/);
+  const plan = f.store.latest(f.quest.id, "plan");
+  await assert.rejects(
+    f.engine.action("SAVE_APPENDIX", {
+      questId: f.quest.id,
+      planArtifactId: "old-plan",
+      content: "# Tasks",
+    }),
+    /revision changed/,
+  );
+  await f.engine.action("SAVE_APPENDIX", {
+    questId: f.quest.id,
+    planArtifactId: plan.id,
+    content: "# Weighted tasks",
+  });
+  const appendix = f.store.latest(f.quest.id, "appendix");
+  await assert.rejects(f.publish(), /current appendix/);
+  const batches = [];
+  f.adapters.skill.publish = async (input) => {
+    batches.push(input);
+    return input.tasks.map((task, index) => ({
+      taskId: task.id,
+      key: `DEV-${batches.length * 10 + index}`,
+    }));
+  };
+  const publish = () =>
+    f.engine.action("PUBLISH_JIRA", {
+      questId: f.quest.id,
+      appendixArtifactId: appendix.id,
+    });
+  await publish();
+  assert.equal(batches[0].tasks.length, 1);
+  assert.equal(batches[0].publicationPhase, "sample");
+  assert.equal(batches[0].appendixPath, appendix.file);
+  await publish();
+  assert.equal(batches[1].tasks.length, 3);
+  assert.equal(f.store.get("quests", f.quest.id).state, "TASKS_PUBLISHED");
+});
+
+test("office commit generation and team handoff survive notification failure", async (t) => {
+  const f = await fixture(t);
+  f.adapters.config.googleChat = { webhookEnv: "TEST_WEBHOOK" };
+  f.adapters.workflow = {
+    instructions: async () => "Office commit skill instructions",
+  };
+  await f.plan();
+  await f.publish();
+  for (const task of f.engine.tasks(f.quest.id)) {
+    await f.engine.action("START_TASK", {
+      questId: f.quest.id,
+      taskId: task.id,
+    });
+    await f.finish();
+  }
+  const work = f.engine.works(f.quest.id)[0];
+  const input = { questId: f.quest.id, workId: work.id };
+  await f.engine.action("REVIEW_REPOSITORY", input);
+  await f.finish("Reviewed");
+  await f.engine.action("APPROVE_REVIEW", input);
+  await f.engine.action("GENERATE_COMMIT_MESSAGE", input);
+  await f.finish(`fix : improve workflow (${work.branch})`);
+  let message;
+  f.adapters.git.commit = async (_path, text) => {
+    message = text;
+  };
+  await assert.rejects(
+    f.engine.action("CREATE_PR", {
+      ...input,
+      commitMessage: "feat: wrong office format",
+    }),
+    /office commit format/,
+  );
+  await f.engine.action("CREATE_PR", input);
+  assert.equal(message, `fix : improve workflow (${work.branch})`);
+  let reviewCalls = 0;
+  f.adapters.sourceControl.requestReview = async () => {
+    reviewCalls++;
+  };
+  await assert.rejects(
+    f.engine.action("NOTIFY_REVIEW", input),
+    /reviewers first/,
+  );
+  await f.engine.action("REQUEST_REVIEW", {
+    ...input,
+    reviewers: ["teammate"],
+  });
+  assert.equal(reviewCalls, 1);
+  const notifications = [];
+  f.adapters.chat = {
+    send: async (notification) => {
+      notifications.push(notification);
+      if (notifications.length === 1) throw new Error("Delivery unknown");
+      return { name: "spaces/test/messages/one" };
+    },
+  };
+  await assert.rejects(
+    f.engine.action("NOTIFY_REVIEW", input),
+    /Delivery unknown/,
+  );
+  assert.equal(f.store.get("works", work.id).notifiedAt, undefined);
+  await f.engine.action("NOTIFY_REVIEW", input);
+  await f.engine.action("NOTIFY_REVIEW", input);
+  assert.equal(notifications.length, 2);
+  assert.equal(notifications[0].requestId, notifications[1].requestId);
+  assert.equal(notifications[0].text, notifications[1].text);
+  assert.ok(f.store.get("works", work.id).notifiedAt);
+  assert.equal(f.created.length, 1);
+  const second = f.engine.works(f.quest.id)[1];
+  const secondInput = { questId: f.quest.id, workId: second.id };
+  await f.engine.action("REVIEW_REPOSITORY", secondInput);
+  await f.finish("Reviewed");
+  await f.engine.action("APPROVE_REVIEW", secondInput);
+  await f.engine.action("CREATE_PR", secondInput);
+  assert.equal(f.store.get("quests", f.quest.id).state, "REVIEW_HANDOFF");
+  await f.engine.action("REQUEST_REVIEW", {
+    ...secondInput,
+    reviewers: ["teammate"],
+  });
+  await f.engine.action("NOTIFY_REVIEW", secondInput);
+  assert.equal(f.store.get("quests", f.quest.id).state, "PRS_CREATED");
+});
+
+test("partial weighted Jira tasks preserve every issue and block execution until complete", async (t) => {
+  const f = await fixture(t);
+  await f.plan();
+  const task = f.engine.tasks(f.quest.id)[0];
+  f.adapters.skill.publish = async () => [
+    { taskId: task.id, key: "FFE-1", complete: false },
+  ];
+  await f.publish();
+  assert.equal(f.store.get("tasks", task.id).jira.complete, false);
+  await assert.rejects(
+    f.engine.action("START_TASK", { questId: f.quest.id, taskId: task.id }),
+    /Publish/,
+  );
+  f.adapters.skill.publish = async () => [
+    { taskId: task.id, key: "FFE-2", complete: true },
+  ];
+  await f.publish();
+  assert.deepEqual(
+    f.store.get("tasks", task.id).jira.issues.map((issue) => issue.key),
+    ["FFE-1", "FFE-2"],
+  );
+  assert.equal(f.store.get("tasks", task.id).jira.complete, true);
+});
+
+test("waiting brainstorm can finalize its brief without entering a plan approval loop", async (t) => {
+  const f = await fixture(t);
+  const q = await f.engine.action("CREATE_QUEST", {
+    kind: "TECH",
+    title: "Simplify publisher",
+    content: "Keep the existing event schema",
+    repositoryIds: [f.repos[0].id],
+  });
+  await f.engine.action("START_BRAINSTORM", { questId: q.id });
+  await f.finish(
+    "DEVQUEST_WAITING_INPUT\nReady to summarize. Shall I enter plan mode?",
+    true,
+  );
+  await f.engine.action("FINISH_BRAINSTORM", { questId: q.id });
+  assert.match(f.pending[0].options.prompt, /Keep the existing event schema/);
+  assert.match(f.pending[0].options.prompt, /final technical brief/i);
+  assert.equal(f.pending[0].options.readOnly, true);
+  await f.finish(
+    "# Technical brief\nUse one publisher and preserve the event schema.",
+  );
+  assert.match(
+    f.store.content(f.store.latest(q.id, "technical-brief")),
+    /preserve the event schema/,
+  );
+  await f.engine.action("ANALYZE_PRD", { questId: q.id });
+  assert.equal(f.pending.length, 1);
+});
+
+test("relinking a moved repository preserves Quest identity and repairs failed design sessions", async (t) => {
+  const f = await fixture(t);
+  const repo = f.repos[0];
+  f.store.put("repositories", {
+    ...repo,
+    remote: "git@github.com:example/project.git",
+    error: "Missing folder",
+  });
+  f.adapters.git.register = async (path) => ({
+    path,
+    name: "project",
+    remote: "https://github.com/example/project.git",
+  });
+  await f.engine.action("ANALYZE_PRD", { questId: f.quest.id });
+  await assert.rejects(
+    f.engine.action("UPDATE_REPOSITORY", {
+      repositoryId: repo.id,
+      path: "/moved/project",
+    }),
+    /agent process/,
+  );
+  f.pending.shift().reject(new Error("spawn claude ENOENT"));
+  await Promise.all([...f.engine.jobs.values()].map((job) => job.done));
+  const run = f.store.all("runs").at(-1);
+  await f.engine.action("UPDATE_REPOSITORY", {
+    repositoryId: repo.id,
+    path: "/moved/project",
+  });
+  assert.equal(f.store.get("repositories", repo.id).path, "/moved/project");
+  assert.equal(f.store.get("repositories", repo.id).error, null);
+  assert.equal(f.store.get("runs", run.id).cwd, "/moved/project");
+  assert.ok(f.store.get("quests", f.quest.id).repositoryIds.includes(repo.id));
+  f.adapters.git.register = async (path) => ({
+    path,
+    remote: "https://github.com/example/other.git",
+  });
+  await assert.rejects(
+    f.engine.action("UPDATE_REPOSITORY", {
+      repositoryId: repo.id,
+      path: "/wrong/project",
+    }),
+    /same Git remote/,
   );
 });

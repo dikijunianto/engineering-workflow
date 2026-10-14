@@ -1,11 +1,35 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import http from "node:http";
 import { createServer, importFile } from "../src/server.js";
 import { Store } from "../src/store.js";
+
+test("Markdown downloads use saved records and verify integrity", async (t) => {
+  const app = await createServer({
+    dataDir: mkdtempSync(path.join(os.tmpdir(), "devquest-docs-")),
+    port: 0,
+    adapters: { config: {}, runtimes: {}, git: {} },
+  });
+  t.after(() => app.close());
+  const doc = app.store.artifact(
+    "quest-docs",
+    "spec",
+    "# Specification\n\nSaved Markdown.",
+  );
+  const response = await fetch(`${app.url}/api/artifacts/${doc.id}`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type"), /text\/markdown/);
+  assert.match(response.headers.get("content-disposition"), /spec-r1.md/);
+  assert.equal(await response.text(), app.store.content(doc));
+  assert.equal((await fetch(`${app.url}/api/artifacts/missing`)).status, 404);
+  writeFileSync(doc.file, "Tampered");
+  const corrupt = await fetch(`${app.url}/api/artifacts/${doc.id}`);
+  assert.equal(corrupt.status, 400);
+  assert.match((await corrupt.json()).error, /integrity mismatch/);
+});
 
 test("a data directory is owned by one live application instance", () => {
   const dir = mkdtempSync(path.join(os.tmpdir(), "devquest-instance-"));
@@ -33,6 +57,9 @@ test("loopback API rejects foreign origins, spoofed hosts, missing token and arb
       .includes("frame-ancestors 'none'"),
   );
   assert.ok((await page.text()).includes("DevQuest"));
+  const markdownModule = await fetch(`${app.url}/vendor/marked.js`);
+  assert.equal(markdownModule.status, 200);
+  assert.match(markdownModule.headers.get("content-type"), /text\/javascript/);
   const art = await fetch(`${app.url}/devquest/backgrounds/midnight-reach.png`);
   assert.equal(art.status, 200);
   assert.match(art.headers.get("content-type"), /^image\/png/);
@@ -141,4 +168,25 @@ test("PDF intake extracts text from a real single-page PDF", async () => {
     }),
     /DevQuest PDF requirement/,
   );
+});
+
+test("failed integration setup releases the data directory for a retry", async (t) => {
+  const dataDir = mkdtempSync(path.join(os.tmpdir(), "devquest-setup-retry-"));
+  const name = "DEVQUEST_MISSING_TEST_CREDENTIAL_9271";
+  delete process.env[name];
+  await assert.rejects(
+    createServer({
+      dataDir,
+      port: 0,
+      config: { testing: { credentialEnv: [name] } },
+    }),
+    /Missing test credential/,
+  );
+  const app = await createServer({
+    dataDir,
+    port: 0,
+    adapters: { config: {}, runtimes: {}, git: {} },
+  });
+  t.after(() => app.close());
+  assert.ok(app.url);
 });

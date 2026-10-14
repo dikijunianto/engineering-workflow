@@ -11,6 +11,7 @@ import {
   CodexRuntime,
   ConfluenceAdapter,
   GitHubProvider,
+  GoogleChatWebhook,
   SkillRunner,
   createAdapters,
   runProcess,
@@ -46,7 +47,39 @@ test("adapter bundle exposes its trusted configuration for engine status", async
     jiraSkill: { executable: "bridge" },
     confluence: { host: "https://docs.example.test" },
   };
-  assert.equal((await createAdapters(config)).config, config);
+  const resolved = (await createAdapters(config)).config;
+  assert.equal(resolved.jiraSkill, config.jiraSkill);
+  assert.equal(resolved.confluence, config.confluence);
+});
+
+test("missing base branch reports a recoverable setup error without creating work", async (t) => {
+  const repo = await repositoryFixture(t);
+  const worktree = path.join(
+    path.dirname(repo),
+    `${path.basename(repo)}-missing-base`,
+  );
+  t.after(() => rm(worktree, { recursive: true, force: true }));
+  const { git: adapter } = await createAdapters();
+  await adapter.register(repo);
+  await assert.rejects(
+    adapter.prepare({
+      repoPath: repo,
+      path: worktree,
+      branch: "devquest/missing-base",
+      baseBranch: "unavailable",
+    }),
+    /Base branch unavailable is unavailable/,
+  );
+  await adapter.prepare({
+    repoPath: repo,
+    path: worktree,
+    branch: "devquest/missing-base",
+  });
+  await adapter.reconcile({
+    repoPath: repo,
+    path: worktree,
+    branch: "devquest/missing-base",
+  });
 });
 
 test("git adapter registers only repository roots and reconciles its own worktrees", async (t) => {
@@ -250,7 +283,7 @@ test("Claude runtime uses native resume only when persistence is configured", as
       return {
         code: 0,
         stdout:
-          "--print --output-format --verbose --no-session-persistence --permission-mode --resume --tools --strict-mcp-config --mcp-config",
+          "--print --output-format --verbose --no-session-persistence --permission-mode --allowedTools --resume --tools --strict-mcp-config --mcp-config",
         stderr: "",
       };
     if (args.includes("--version"))
@@ -272,7 +305,11 @@ test("Claude runtime uses native resume only when persistence is configured", as
   assert.ok(calls.at(-1).args.includes("--resume"));
   assert.ok(calls.at(-1).args.includes("session-1"));
   assert.ok(!calls.at(-1).args.includes("--no-session-persistence"));
-  assert.ok(calls.at(-1).args.includes("plan"));
+  assert.ok(!calls.at(-1).args.includes("plan"));
+  assert.ok(calls.at(-1).args.includes("dontAsk"));
+  const args = calls.at(-1).args;
+  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read,Glob,Grep");
+  assert.equal(args[args.indexOf("--tools") + 1], "Read,Glob,Grep");
   assert.equal(result.text, "continued");
   assert.equal(result.sessionId, "session-2");
 });
@@ -364,7 +401,7 @@ test("runtime error events fail turns even when the CLI exits zero", async () =>
       return {
         code: 0,
         stdout:
-          "--print --output-format --no-session-persistence --permission-mode --tools --strict-mcp-config --mcp-config",
+          "--print --output-format --no-session-persistence --permission-mode --allowedTools --tools --strict-mcp-config --mcp-config",
         stderr: "",
       };
     options.onStdout?.(
@@ -430,7 +467,7 @@ test("Jira skill bridge receives stable idempotency keys and preserves partial r
     ],
   );
   assert.deepEqual(payloads[0].tasks, payloads[1].tasks);
-  await assert.rejects(new SkillRunner().publish(input), /configure.*bridge/i);
+  await assert.rejects(new SkillRunner().publish(input), /configure.*skill/i);
 });
 
 test("Confluence fetch imports the main page and direct same-host pages only", async () => {
@@ -592,15 +629,22 @@ test("Confluence resolves direct storage page references by exact title without 
   assert.equal(requested.length, 2);
 });
 
-test("GitHub provider reuses an open matching PR without pushing", async () => {
+test("GitHub provider reuses a matching PR only after verifying its head", async () => {
   const calls = [];
   const runner = async (file, args) => {
     calls.push([file, args]);
     return {
       code: 0,
-      stdout: JSON.stringify([
-        { number: 7, url: "https://github.test/acme/repo/pull/7" },
-      ]),
+      stdout:
+        file === "git"
+          ? "abc"
+          : JSON.stringify([
+              {
+                number: 7,
+                url: "https://github.test/acme/repo/pull/7",
+                headRefOid: "abc",
+              },
+            ]),
       stderr: "",
     };
   };
@@ -615,8 +659,12 @@ test("GitHub provider reuses an open matching PR without pushing", async () => {
     }),
     { url: "https://github.test/acme/repo/pull/7", number: 7 },
   );
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.equal(calls[0][0], "gh");
+  assert.equal(
+    calls.some(([file, args]) => file === "git" && args[0] === "push"),
+    false,
+  );
 });
 
 test("node validation refuses an empty test suite", async (t) => {
@@ -681,4 +729,354 @@ test("missing native session falls back once to logical continuation", async () 
   });
   assert.equal(attempts, 2);
   assert.equal(result.text, "Logically continued");
+});
+
+test("review fingerprint changes when development advances", async (t) => {
+  const repo = await repositoryFixture(t);
+  const work = path.join(repo, "../" + path.basename(repo) + "-review");
+  t.after(() => rm(work, { recursive: true, force: true }));
+  const { git: adapter } = await createAdapters();
+  await adapter.register(repo);
+  await adapter.prepare({ repoPath: repo, path: work, branch: "audit/review" });
+  const before = await adapter.inspect(work);
+  await writeFile(path.join(repo, "README.md"), "upstream change\n");
+  await git(repo, "add", ".");
+  await git(repo, "commit", "-m", "advance base");
+  const after = await adapter.inspect(work);
+  assert.notEqual(before.diff, after.diff);
+  assert.notEqual(before.fingerprint, after.fingerprint);
+  assert.equal(before.contentFingerprint, after.contentFingerprint);
+});
+
+test("review diff includes files in new directories", async (t) => {
+  const repo = await repositoryFixture(t);
+  await mkdir(path.join(repo, "new-module"));
+  await writeFile(
+    path.join(repo, "new-module", "index.js"),
+    "export const answer = 42;\n",
+  );
+  const { git: adapter } = await createAdapters();
+  assert.match((await adapter.inspect(repo)).diff, /export const answer = 42/);
+});
+
+test("npm validation refuses a zero-test suite", async (t) => {
+  const repo = await repositoryFixture(t);
+  await writeFile(
+    path.join(repo, "package.json"),
+    JSON.stringify({ scripts: { test: "node --test" } }),
+  );
+  const { git: adapter } = await createAdapters();
+  const result = await adapter.test(repo, "npm-test");
+  assert.equal(result.passed, false, result.summary);
+});
+
+test("existing PR is updated and verified before delivery succeeds", async () => {
+  const calls = [];
+  let pushed = false;
+  const runner = async (file, args) => {
+    calls.push([file, args]);
+    if (file === "git" && args[0] === "push") pushed = true;
+    return {
+      code: 0,
+      stderr: "",
+      stdout:
+        file === "git"
+          ? "new-head"
+          : JSON.stringify([
+              {
+                number: 7,
+                url: "https://github.test/acme/repo/pull/7",
+                headRefOid: pushed ? "new-head" : "old-head",
+              },
+            ]),
+    };
+  };
+  const result = await new GitHubProvider({ runner }).create({
+    path: process.cwd(),
+    branch: "devquest/one",
+    title: "One",
+    body: "Body",
+  });
+  assert.equal(result.number, 7);
+  assert.ok(pushed);
+  assert.equal(
+    calls.some(([file, args]) => file === "gh" && args[1] === "create"),
+    false,
+  );
+  assert.equal(calls.filter(([file]) => file === "gh").length, 2);
+});
+
+test("a PR with the wrong remote head never reports successful publication", async () => {
+  const runner = async (file) => ({
+    code: 0,
+    stderr: "",
+    stdout:
+      file === "git"
+        ? "reviewed-head"
+        : JSON.stringify([
+            {
+              number: 7,
+              url: "https://github.test/acme/repo/pull/7",
+              headRefOid: "wrong-head",
+            },
+          ]),
+  });
+  await assert.rejects(
+    new GitHubProvider({ runner }).create({
+      path: process.cwd(),
+      branch: "devquest/one",
+    }),
+    /reviewed commit/,
+  );
+});
+
+test("reviewer requests are validated and verified with GitHub", async () => {
+  const calls = [];
+  const provider = new GitHubProvider({
+    runner: async (_file, args) => {
+      calls.push(args);
+      return {
+        code: 0,
+        stderr: "",
+        stdout: JSON.stringify({ reviewRequests: [{ login: "teammate" }] }),
+      };
+    },
+  });
+  await assert.rejects(
+    provider.requestReview({ reviewers: ["--help"] }),
+    /usernames/,
+  );
+  assert.equal(calls.length, 0);
+  await provider.requestReview({
+    path: process.cwd(),
+    number: 7,
+    reviewers: ["teammate"],
+  });
+  assert.ok(calls[0].includes("--add-reviewer"));
+  await assert.rejects(
+    provider.requestReview({
+      path: process.cwd(),
+      number: 7,
+      reviewers: ["missing"],
+    }),
+    /not confirmed/,
+  );
+});
+
+test("Google Chat retries retain request IDs and never disclose webhook credentials", async (t) => {
+  const name = "DEVQUEST_TEST_CHAT_WEBHOOK";
+  process.env[name] =
+    "https://chat.googleapis.com/v1/spaces/test/messages?key=secret-key&token=secret-token";
+  t.after(() => delete process.env[name]);
+  const calls = [];
+  const adapter = new GoogleChatWebhook({
+    webhookEnv: name,
+    fetch: async (url, options) => {
+      calls.push({ url: new URL(url), options });
+      if (calls.length === 1) throw new Error("secret-token");
+      return new Response(
+        JSON.stringify({ name: "spaces/test/messages/receipt" }),
+        {
+          status: 200,
+        },
+      );
+    },
+  });
+  const input = { text: "Review PR", requestId: "stable-request" };
+  await assert.rejects(
+    adapter.send(input),
+    (error) =>
+      !error.message.includes("secret-token") &&
+      /not confirmed/.test(error.message),
+  );
+  assert.deepEqual(await adapter.send(input), {
+    name: "spaces/test/messages/receipt",
+  });
+  assert.equal(
+    calls[0].url.searchParams.get("requestId"),
+    calls[1].url.searchParams.get("requestId"),
+  );
+  assert.equal(calls[0].options.body, calls[1].options.body);
+  process.env[name] = "https://outside.test/messages";
+  await assert.rejects(adapter.send(input), /HTTPS Google Chat/);
+  assert.equal(calls.length, 2);
+});
+
+test("test credentials reach child processes but not test summaries or model output", async (t) => {
+  const name = "DEVQUEST_TEST_LOGIN_TOKEN";
+  process.env[name] = "test-credential-value";
+  t.after(() => delete process.env[name]);
+  const runner = async (_file, args, options = {}) => {
+    if (args.includes("--version"))
+      return { code: 0, stdout: "codex 1", stderr: "" };
+    if (args.includes("--help"))
+      return { code: 0, stdout: "--json --sandbox --ephemeral", stderr: "" };
+    assert.equal(options.env[name], "test-credential-value");
+    options.onStdout?.(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "token test-credential-value" },
+      }) + "\n",
+    );
+    return {
+      code: 0,
+      stdout: "# tests 1\n# pass 1\ntest-credential-value",
+      stderr: "",
+    };
+  };
+  const adapters = await createAdapters({
+    runner,
+    testing: { credentialEnv: [name] },
+  });
+  const result = await adapters.git.test(process.cwd(), "node-test");
+  assert.equal(result.passed, true);
+  assert.doesNotMatch(result.summary, /test-credential-value/);
+  const events = [];
+  const turn = await adapters.runtimes.codex.start({
+    cwd: process.cwd(),
+    prompt: "test",
+    onEvent: (event) => events.push(event),
+  });
+  assert.doesNotMatch(
+    JSON.stringify({ turn, events }),
+    /test-credential-value/,
+  );
+});
+
+test("local skill paths and appendix bridge retain the approved plan contract", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "devquest-skills-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const skillPath = path.join(dir, "SKILL.md");
+  await writeFile(skillPath, "# Local skill\nUse office format.");
+  let payload;
+  const adapters = await createAdapters({
+    workflow: { skills: { commit: skillPath } },
+    skill: { bridge: { executable: "local-bridge" } },
+    runner: async (_file, _args, options) => {
+      payload = JSON.parse(options.input);
+      return {
+        code: 0,
+        stdout: JSON.stringify({ content: "# Weighted appendix" }),
+        stderr: "",
+      };
+    },
+  });
+  assert.match(
+    await adapters.workflow.instructions("commit"),
+    /Use office format/,
+  );
+  assert.match(await adapters.workflow.instructions("commit"), /Do not commit/);
+  assert.equal(
+    await adapters.skill.appendix({ planPath: "approved-plan.md" }),
+    "# Weighted appendix",
+  );
+  assert.equal(payload.planPath, "approved-plan.md");
+  assert.equal(payload.operation, "generate-appendix");
+});
+
+test("direct local Jira skills isolate the configured MCP server and preserve partial mappings", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "devquest-direct-jira-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "SKILL.md");
+  const mcpConfigPath = path.join(dir, "claude.json");
+  await writeFile(
+    file,
+    "# Upload tasks\nCreate one sample, then batches of five.",
+  );
+  await writeFile(
+    mcpConfigPath,
+    JSON.stringify({
+      mcpServers: {
+        atlassian: { type: "http", url: "https://jira.example/mcp" },
+        unrelated: { type: "http", url: "https://other.example/mcp" },
+      },
+    }),
+  );
+  let copied;
+  const runtime = {
+    start: async (input) => {
+      copied = input.mcpConfig;
+      const config = JSON.parse(
+        await import("node:fs/promises").then(({ readFile }) =>
+          readFile(copied, "utf8"),
+        ),
+      );
+      assert.deepEqual(Object.keys(config.mcpServers), ["atlassian"]);
+      assert.ok(input.mcpTools.includes("mcp__atlassian__createJiraIssue"));
+      assert.ok(!input.mcpTools.some((tool) => /delete|edit/i.test(tool)));
+      assert.match(input.prompt, /Create at most maxIssues/);
+      assert.doesNotMatch(input.prompt, /https:\/\/jira.example/);
+      return {
+        text: JSON.stringify({
+          results: [
+            {
+              taskId: "task-a",
+              key: "FFE-1",
+              url: "https://jira.example/FFE-1",
+            },
+            { taskId: "outside-scope", key: "FFE-2", complete: true },
+          ],
+        }),
+      };
+    },
+  };
+  const skill = new SkillRunner({ runtime, mcpConfigPath });
+  const result = await skill.publish({
+    quest: { id: "q" },
+    tasks: [{ id: "task-a" }],
+    planPath: path.join(dir, "plan.md"),
+    skillPaths: { upload: file },
+    maxIssues: 1,
+    publicationPhase: "sample",
+  });
+  assert.equal(result.length, 1);
+  assert.equal(result[0].complete, false);
+  await assert.rejects(
+    import("node:fs/promises").then(({ stat }) => stat(copied)),
+    /ENOENT/,
+  );
+  skill.close();
+  await assert.rejects(
+    skill.appendix({
+      planPath: path.join(dir, "plan.md"),
+      skillPaths: { appendix: file },
+    }),
+    { name: "AbortError" },
+  );
+});
+
+test("Claude Jira skill mode allows only named MCP tools and denies other permissions", () => {
+  const runtime = new ClaudeCodeRuntime();
+  runtime.help = "--permission-mode --allowedTools --allowedTools";
+  const args = runtime.buildArgs({
+    readOnly: true,
+    mcpConfig: "/private/mcp.json",
+    mcpTools: ["mcp__atlassian__createJiraIssue"],
+  });
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(args[args.indexOf("--tools") + 1], "Read");
+  assert.equal(args[args.indexOf("--mcp-config") + 1], "/private/mcp.json");
+  assert.equal(
+    args[args.indexOf("--allowedTools") + 1],
+    "Read,mcp__atlassian__createJiraIssue",
+  );
+  assert.ok(args.includes("--no-session-persistence"));
+});
+
+test("desktop command lookup finds Node when the launch PATH is empty", async () => {
+  const result = await runProcess(
+    path.basename(process.execPath),
+    ["-e", "process.stdout.write('resolved')"],
+    { env: { PATH: "" } },
+  );
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, "resolved");
+});
+
+test("a missing working directory is reported before spawning an installed CLI", async () => {
+  const cwd = path.join(tmpdir(), "devquest-missing-directory-" + Date.now());
+  await assert.rejects(
+    runProcess(process.execPath, ["--version"], { cwd }),
+    /Working directory is unavailable/,
+  );
 });
