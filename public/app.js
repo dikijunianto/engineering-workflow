@@ -4,10 +4,7 @@ const $ = (selector) => document.querySelector(selector);
 const esc = (value) =>
   String(value ?? "").replace(
     /[&<>"']/g,
-    (char) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
-        char
-      ],
+    (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char],
   );
 const safeUrl = (value) => {
   try {
@@ -19,7 +16,8 @@ const safeUrl = (value) => {
 };
 let state,
   token,
-  loading = false;
+  loading = false,
+  workspaceJiraDirty = false;
 const liveOutput = new Map();
 const documentModes = new Map();
 const markdown = new Marked({
@@ -30,9 +28,7 @@ const markdown = new Marked({
     link({ href, tokens }) {
       const label = this.parser.parseInline(tokens);
       const url = safeUrl(href);
-      return url === "#"
-        ? label
-        : `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`;
+      return url === "#" ? label : `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`;
     },
     image({ text }) {
       return esc(text);
@@ -45,11 +41,11 @@ const documentPreview = (key, title, content = "") =>
   `<div class="document-views" data-view="${documentModes.get(key) || "viewer"}"><article class="document markdown-view" tabindex="0" aria-label="${esc(title)} rendered Markdown">${markdown.parse(content.split("<!-- devquest-tasks")[0])}</article><pre class="document markdown-source" tabindex="0" aria-label="${esc(title)} original Markdown">${esc(content)}</pre></div>`;
 // Presentation-only primitives. Action handlers and API payloads stay below.
 const icons = {
+  folder: '<path d="M3 7V4h6l2 3h10v13H3Z"/>',
   sword: '<path d="m14 4 6-1-1 6-9 9-4-4Z M5 13l6 6 M7 17l-4 4 M2 19l3 3"/>',
   home: '<path d="m3 10 9-7 9 7 M5 9v12h5v-7h4v7h5V9"/>',
   quest: '<path d="M6 21V3m0 1c5-4 7 4 13 0v10c-6 4-8-4-13 0"/>',
-  repository:
-    '<path d="M5 3h13v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 14h13 M8 3v7l3-2 3 2V3"/>',
+  repository: '<path d="M5 3h13v18H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm0 14h13 M8 3v7l3-2 3 2V3"/>',
   party:
     '<circle cx="12" cy="7" r="3"/><path d="M7 20v-3a5 5 0 0 1 10 0v3 M5 9a3 3 0 0 0-2 5m16-5a3 3 0 0 1 2 5 M2 21v-2a4 4 0 0 1 3-4m17 6v-2a4 4 0 0 0-3-4"/>',
   jira: '<path d="m12 2 10 10-10 10L2 12Z m0 6 4 4-4 4-4-4Z"/>',
@@ -82,8 +78,20 @@ const roles = [
   { key: "developer", label: "Developer", purposes: ["task"] },
   { key: "reviewer", label: "Reviewer", purposes: ["review"] },
 ];
+const orchestratorRole = {
+  key: "orchestrator",
+  label: "Orchestrator",
+  purposes: ["v11-route"],
+};
+const appendixRole = {
+  key: "jira_appendix",
+  label: "Jira Appendix Agent",
+  purposes: ["jira_appendix_generation"],
+};
 const roleFor = (run) =>
-  roles.find((r) => r.purposes.includes(run.purpose)) || roles[2];
+  [appendixRole, orchestratorRole, ...roles].find(
+    (r) => r.key === run.role || r.purposes.includes(run.purpose),
+  ) || roles[2];
 const runtimeName = (key) => (key === "codex" ? "Codex" : "Claude Code");
 const labels = {
   home: "Overview",
@@ -105,6 +113,15 @@ const button = (label, action, data = {}, style = "") =>
   `<button class="btn ${style}" data-action="${action}" ${Object.entries(data)
     .map(([key, value]) => `data-${key}="${esc(value)}"`)
     .join(" ")}>${label}</button>`;
+const appendixApprovalButton = (doc, style) =>
+  doc.approvalReady === false
+    ? `<button class="btn ${style}" disabled title="${esc(doc.approvalError)}">Approve appendix revision</button><small role="status">${esc(doc.approvalError)}</small>`
+    : button(
+        "Approve appendix revision",
+        "APPROVE_APPENDIX",
+        { "quest-id": doc.questId, "artifact-id": doc.id },
+        style,
+      );
 function badge(status) {
   const warn = /WAITING|PAUSED|INTERRUPTED|REVIEW|DRAFT|AWAITING/.test(status);
   const bad = /FAIL|RECOVERY|BLOCK/.test(status);
@@ -123,27 +140,18 @@ function badge(status) {
 }
 const repository = (id) => state.repositories.find((r) => r.id === id);
 const questTasks = (id) => state.tasks.filter((t) => t.questId === id);
-const artifact = (id, kind) =>
-  state.artifacts.find((a) => a.questId === id && a.kind === kind);
+const artifact = (id, kind) => state.artifacts.find((a) => a.questId === id && a.kind === kind);
 const pct = (quest) => {
   const tasks = questTasks(quest.id);
   return tasks.length
-    ? Math.round(
-        (tasks.filter((t) => t.state === "COMPLETED").length / tasks.length) *
-          100,
-      )
+    ? Math.round((tasks.filter((t) => t.state === "COMPLETED").length / tasks.length) * 100)
     : 0;
 };
 const bar = (value) =>
   `<progress class="native-progress" max="100" value="${value}" aria-label="Progress ${value}%">${value}%</progress>`;
 const empty = (symbol, title, copy, action = "") =>
   `<div class="empty"><span class="empty-icon">${symbol.startsWith("<svg") ? symbol : icon({ "▱": "repository", "✳": "party", "◇": "jira", "◷": "clock", "☷": "document" }[symbol] || "quest")}</span><h3>${title}</h3><p>${copy}</p>${action}</div>`;
-const head = (
-  title,
-  subtitle,
-  action = "",
-  eyebrow = "YOUR ENGINEERING WORKSPACE",
-) =>
+const head = (title, subtitle, action = "", eyebrow = "YOUR ENGINEERING WORKSPACE") =>
   `<div class="page-head"><div class="hero-copy"><div class="eyebrow">${eyebrow}</div><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div><div class="hero-aside"><p class="hero-quote">${title === "Repositories" ? "Small repositories<br>build greater adventures." : "Small commits.<br>A greater world."}</p>${action}</div></div>`;
 const panel = (title, body, link = "") =>
   `<section class="panel"><div class="panel-head"><h2>${title}</h2>${link}</div>${body}</section>`;
@@ -158,80 +166,82 @@ function latestAttempts(runs) {
   // The store returns insertion order; retries replace only their own scope.
   const latest = new Map();
   for (const run of runs)
-    latest.set(
-      JSON.stringify([
-        run.questId,
-        run.purpose,
-        run.taskId || run.workId || null,
-      ]),
-      run,
-    );
+    latest.set(JSON.stringify([run.questId, run.purpose, run.taskId || run.workId || null]), run);
   return [...latest.values()];
 }
 function partyCards(runs = state.runs) {
-  return `<div class="party-grid">${roles
+  return `<div class="party-grid">${(runs.some((run) => run.workflowVersion === 2)
+    ? [
+        orchestratorRole,
+        ...roles,
+        ...(runs.some((r) => r.purpose === "jira_appendix_generation") ? [appendixRole] : []),
+      ]
+    : [
+        ...roles,
+        ...(runs.some((r) => r.purpose === "jira_appendix_generation") ? [appendixRole] : []),
+      ]
+  )
     .map((role) => {
-      const matching = latestAttempts(runs).filter(
-        (r) => roleFor(r).key === role.key,
-      );
+      const matching = latestAttempts(runs).filter((r) => roleFor(r).key === role.key);
       const run =
         matching.find((r) =>
-          [
-            "RUNNING",
-            "WAITING_INPUT",
-            "PAUSED",
-            "INTERRUPTED",
-            "FAILED",
-          ].includes(r.state),
+          ["RUNNING", "WAITING_INPUT", "PAUSED", "INTERRUPTED", "FAILED"].includes(r.state),
         ) || matching.at(-1);
       const active =
-        run &&
-        [
-          "RUNNING",
-          "WAITING_INPUT",
-          "PAUSED",
-          "INTERRUPTED",
-          "FAILED",
-        ].includes(run.state);
-      return `<article class="party-member ${role.key}"><span class="role-avatar">${icon(role.key)}</span><h3>${role.label}</h3><small>${run ? runtimeName(run.runtime) : "Choose on start"}</small>${badge(active ? run.state : "IDLE")}${run ? `<a class="party-context" href="#quest/${esc(run.questId)}/overview">${esc(state.quests.find((q) => q.id === run.questId)?.title || "View Quest")}</a>` : ""}</article>`;
+        run && ["RUNNING", "WAITING_INPUT", "PAUSED", "INTERRUPTED", "FAILED"].includes(run.state);
+      return `<article class="party-member ${role.key}"><span class="role-avatar">${icon(role.key === "jira_appendix" ? "jira" : role.key === "orchestrator" ? "architect" : role.key)}</span><h3>${role.label}</h3><small>${run ? runtimeName(run.runtime) : "Choose on start"}</small>${run?.route ? `<small>${esc(run.actualModel || run.resolvedModel)} · ${esc(run.resolvedEffort)}${!run.actualModel ? " (runtime report unavailable)" : ""}</small><small>${matching.filter((item) => item.state === "RUNNING").length} active · ${esc(run.route.risk)} risk</small>` : ""}${badge(active ? run.state : "IDLE")}${run ? `<a class="party-context" href="#quest/${esc(run.questId)}/overview">${esc(state.quests.find((q) => q.id === run.questId)?.title || "View Quest")}</a>` : ""}</article>`;
     })
     .join("")}</div>`;
 }
 function questChain(quest) {
   const id = quest.id;
-  const stage = ["PRS_CREATED", "REVIEW_HANDOFF"].includes(quest.state)
-    ? 7
-    : quest.state === "READY_FOR_PR"
-      ? 6
-      : ["EXECUTING", "TASKS_PUBLISHED"].includes(quest.state)
-        ? 5
-        : quest.state === "PLAN_APPROVED"
-          ? 4
-          : quest.state === "PLAN_DRAFT" || quest.state === "TRD_APPROVED"
-            ? 3
-            : artifact(id, "analysis") || quest.state.startsWith("TRD")
-              ? 2
-              : quest.kind === "PRODUCT" || artifact(id, "technical-brief")
-                ? 1
-                : 0;
+  const brainstormDone = quest.state === "BRAINSTORM_COMPLETED";
+  const stage = brainstormDone
+    ? 0
+    : ["PRS_CREATED", "REVIEW_HANDOFF"].includes(quest.state)
+      ? 7
+      : quest.state === "READY_FOR_PR"
+        ? 6
+        : ["EXECUTING", "TASKS_PUBLISHED"].includes(quest.state)
+          ? 5
+          : quest.state === "PLAN_APPROVED"
+            ? 4
+            : quest.state === "PLAN_DRAFT" || quest.state === "TRD_APPROVED"
+              ? 3
+              : artifact(id, "analysis") || quest.state.startsWith("TRD")
+                ? 2
+                : quest.kind === "PRODUCT" ||
+                    artifact(id, "technical-brief") ||
+                    artifact(id, "spec")?.sourceStage === "brainstorm"
+                  ? 1
+                  : 0;
   const blocked =
     latestAttempts(state.runs).some(
-      (r) =>
-        r.questId === id &&
-        /FAILED|WAITING_INPUT|INTERRUPTED|PAUSED/.test(r.state),
-    ) ||
-    state.works.some(
-      (w) => w.questId === id && w.state === "RECOVERY_REQUIRED",
-    );
-  return `<ol class="pipeline" aria-label="Quest workflow">${[quest.kind === "TECH" ? "Brief" : "PRD", "Analysis", "TRD", "Plan", "Jira", "Execute", "PR", quest.state === "REVIEW_HANDOFF" ? "Team review" : "Done"].map((name, i) => `<li class="${i < stage || (i === 7 && quest.state === "PRS_CREATED") ? "done" : i === stage ? `current${blocked ? " blocked" : ""}` : "future"}" ${i === stage ? 'aria-current="step"' : ""}><span class="step-number">${i < stage || (i === 7 && quest.state === "PRS_CREATED") ? icon("check") : i + 1}</span><span>${name}<small>${i === stage && blocked ? "Needs attention" : i < stage ? "Complete" : i === stage ? (quest.state === "PRS_CREATED" ? "Complete" : "Current stage") : "Upcoming"}</small></span></li>`).join("")}</ol>`;
+      (r) => r.questId === id && /FAILED|WAITING_INPUT|INTERRUPTED|PAUSED/.test(r.state),
+    ) || state.works.some((w) => w.questId === id && w.state === "RECOVERY_REQUIRED");
+  return `<ol class="pipeline" aria-label="Quest workflow">${[
+    quest.kind === "TECH" ? (quest.designProtocol === 1 ? "Brainstorm" : "Brief") : "PRD",
+    "Analysis",
+    "TRD",
+    "Plan",
+    "Jira",
+    "Execute",
+    "PR",
+    quest.state === "REVIEW_HANDOFF" ? "Team review" : "Done",
+  ]
+    .map((name, i) => {
+      const done =
+        i < stage || (i === 0 && brainstormDone) || (i === 7 && quest.state === "PRS_CREATED");
+      const current = i === stage && !done;
+      return `<li class="${done ? "done" : current ? `current${blocked ? " blocked" : ""}` : "future"}" ${current ? 'aria-current="step"' : ""}><span class="step-number">${done ? icon("check") : i + 1}</span><span>${name}<small>${done ? "Complete" : current ? (blocked ? "Needs attention" : "Current stage") : "Upcoming"}</small></span></li>`;
+    })
+    .join("")}</ol>`;
 }
 function repositoryCards(quest) {
   return `<div class="repository-cards">${quest.repositoryIds
     .map((id) => {
       const repo = repository(id),
-        work = state.works.find(
-          (w) => w.questId === quest.id && w.repoId === id,
-        );
+        work = state.works.find((w) => w.questId === quest.id && w.repoId === id);
       const tasks = questTasks(quest.id).filter((t) => t.repoId === id),
         done = tasks.filter((t) => t.state === "COMPLETED").length;
       return `<article class="repository-card"><div class="repository-identity"><span class="repo-emblem">${icon("repository")}</span><div><h3 title="${esc(repo?.name)}">${esc(repo?.name)}</h3><small class="truncate" title="${esc(repo?.path)}">${esc(repo?.path)}</small></div></div><div class="progress-row">${bar(tasks.length ? Math.round((done / tasks.length) * 100) : 0)}<span>${done}/${tasks.length} tasks</span></div><div class="branch-label">${icon("branch")}<span title="${esc(work?.branch)}">${esc(work?.branch || "Prepared on first execution")}</span></div><div class="row-head">${badge(work?.state || "PLANNED")}<a class="subtle-link" href="#quest/${quest.id}/repositories">View details ${icon("arrow")}</a></div></article>`;
@@ -290,9 +300,7 @@ function agentsPanel() {
   return (
     Object.entries(state.runtimes)
       .map(([key, runtime]) => {
-        const runs = state.runs.filter(
-          (r) => r.runtime === key && r.state === "RUNNING",
-        );
+        const runs = state.runs.filter((r) => r.runtime === key && r.state === "RUNNING");
         return `<div class="agent-row"><span class="agent-avatar ${key}">${icon(key === "codex" ? "developer" : "spark")}</span><div><strong>${key === "codex" ? "Codex" : "Claude Code"}</strong><small>${runs.length ? `${runs.length} active session${runs.length > 1 ? "s" : ""}` : "Ready when you are"}</small></div>${badge(!runtime.available ? "UNAVAILABLE" : runs.length ? "RUNNING" : "IDLE")}</div>`;
       })
       .join("") +
@@ -308,11 +316,7 @@ function activity(events = state.events) {
             `<div class="activity-row"><i></i><div>${esc(event.message)}<time>${time(event.createdAt)}</time></div></div>`,
         )
         .join("")
-    : empty(
-        "◷",
-        "A clean slate",
-        "Your decisions, milestones and save points will appear here.",
-      );
+    : empty("◷", "A clean slate", "Your decisions, milestones and save points will appear here.");
 }
 function repoTable(repos = state.repositories) {
   if (!repos.length)
@@ -325,7 +329,7 @@ function repoTable(repos = state.repositories) {
   return `<div class="table-scroll" tabindex="0" role="region" aria-label="Repository registry"><table class="registry-table"><thead><tr><th>Repository</th><th>Base branch</th><th>Activity</th><th>Works</th></tr></thead><tbody>${repos
     .map((repo) => {
       const works = state.works.filter((w) => w.repoId === repo.id);
-      return `<tr><td class="repo-name"><div class="repository-identity"><span class="repo-emblem">${icon("repository")}</span><div><strong title="${esc(repo.name)}">${esc(repo.name)}</strong><small class="truncate" title="${esc(repo.path)}">${esc(repo.path)}</small></div></div></td><td><span class="branch-label">${icon("branch")}development</span></td><td>${badge(repo.error ? "RECOVERY_REQUIRED" : works.find((w) => w.state === "EXECUTING") ? "EXECUTING" : "READY")}${repo.error ? `<small>${esc(repo.error)}</small>` : ""}${button("Update path", "repository-path", { "repository-id": repo.id }, "small")}</td><td><span class="work-count">${works.length}</span></td></tr>`;
+      return `<tr><td class="repo-name"><div class="repository-identity"><span class="repo-emblem">${icon("repository")}</span><div><strong title="${esc(repo.name)}">${esc(repo.name)}</strong><small class="truncate" title="${esc(repo.path)}">${esc(repo.path)}</small></div></div></td><td><span class="branch-label">${icon("branch")}${esc(repo.baseBranch || repo.defaultBranch || "Not configured")}</span></td><td>${badge(repo.error ? "RECOVERY_REQUIRED" : works.find((w) => w.state === "EXECUTING") ? "EXECUTING" : "READY")}${repo.error ? `<small>${esc(repo.error)}</small>` : ""}${button("Update path", "repository-path", { "repository-id": repo.id }, "small") + button("Branch policy", "repository-config", { "repository-id": repo.id }, "small")}</td><td><span class="work-count">${works.length}</span></td></tr>`;
     })
     .join("")}</tbody></table></div>`;
 }
@@ -336,9 +340,7 @@ function home() {
     ["WAITING_INPUT", "FAILED", "INTERRUPTED", "PAUSED"].includes(r.state),
   ).length;
   const sprint = state.quests.find((q) => q.sprint)?.sprint;
-  const sprintQuests = state.quests.filter(
-    (q) => q.sprint === sprint && sprint,
-  );
+  const sprintQuests = state.quests.filter((q) => q.sprint === sprint && sprint);
   const finished = sprintQuests.filter((q) => q.state === "PRS_CREATED").length;
   return `${head("A good day to build.", "From the first idea to the pull request. Keep your engineering work in motion.", button("+ New Quest", "new-quest", {}, "primary"))}
     <div class="stats">${[
@@ -358,9 +360,7 @@ function home() {
       [
         "Needs your attention",
         attention,
-        attention
-          ? "Open the agent party to continue"
-          : "All clear. Room to focus.",
+        attention ? "Open the agent party to continue" : "All clear. Room to focus.",
         "◉",
       ],
     ]
@@ -383,26 +383,19 @@ function quests() {
       "All Quests",
       state.quests.length
         ? state.quests.map(questRow).join("")
-        : empty(
-            "⚑",
-            "No Quests yet",
-            "Create your first Product or Tech Quest to begin.",
-          ),
+        : empty("⚑", "No Quests yet", "Create your first Product or Tech Quest to begin."),
     )
   );
 }
 function agents() {
   return (
-    head(
-      "Agent party",
-      "Interact with your agents and pick up from a saved checkpoint.",
-    ) +
+    head("Agent party", "Interact with your agents and pick up from a saved checkpoint.") +
     panel(`${icon("party")} Your party`, partyCards()) +
     `<div class="setting-grid section-space">${Object.entries(state.runtimes)
       .map(([key, r]) =>
         panel(
           key === "codex" ? "Codex" : "Claude Code",
-          `<div class="panel-body">${badge(r.available ? "AVAILABLE" : "UNAVAILABLE")}<p>${esc(r.reason || "Authenticated CLI access is checked when a session starts.")}</p><small>Resume: ${r.nativeResume ? "native when available" : "logical from checkpoints"}</small></div>`,
+          `<div class="panel-body">${badge(r.available ? "AVAILABLE" : "UNAVAILABLE")}<p>${esc(r.reason || "Authenticated CLI access is checked when a session starts.")}</p><small>Resume: ${r.nativeResume ? "native when available" : "logical from checkpoints"}</small><small>CLI ${esc(r.version || "NOT_AVAILABLE")} · Auto Mode: ${r.autoMode ? "CLI supported; organization NOT_VERIFIED" : "NOT_AVAILABLE"} · Nested-agent restriction: ${r.nestedRestriction ? "supported" : "NOT_AVAILABLE"}</small></div>`,
         ),
       )
       .join(
@@ -411,36 +404,30 @@ function agents() {
   );
 }
 const responseText = (value) =>
-  String(value || "").replace(
-    /^\s*DEVQUEST_WAITING_INPUT\b[ \t]*(?:\r?\n)?/,
-    "",
-  );
+  String(value || "").replace(/^\s*DEVQUEST_WAITING_INPUT\b[ \t]*(?:\r?\n)?/, "");
+function agentProfileDetails(run) {
+  const s = run.profileSnapshot;
+  if (!s) return '<small class="panel-body">Agent Profile: LEGACY / UNKNOWN</small>';
+  return `<details class="panel-body"><summary>Agent Profile · ${esc(s.profile.id)}@${esc(s.profile.version)}</summary><p>${esc(s.profile.name)} · Hash: ${esc(s.profile.hash.slice(0, 12))}</p><p>Runtime: ${esc(runtimeName(s.runtime))} · Stage: ${esc(s.stage)}</p><p>Model: ${esc(s.requestedModel || "UNKNOWN")} → ${esc(s.route?.resolvedModel || "UNKNOWN")} · Effort: ${esc(s.requestedEffort || "UNKNOWN")} → ${esc(s.route?.resolvedEffort || "UNKNOWN")} (configured; runtime evidence reported separately)</p><p>Repositories: ${s.capabilities.repositories.map((r) => esc(repository(r.repositoryId || r.id)?.name || (s.role === "jira-specialist" ? "Approved Quest documents" : r.id))).join(", ")}</p><p>Standards: ${s.repositoryStandards.map((p) => `${esc(repository(p.repositoryId)?.name || p.repositoryId)} · ${esc(p.sourceType)} · ${esc(p.status)} · ${esc(p.hash?.slice(0, 12) || "no hash")} · ${esc(p.commit?.slice(0, 8) || "no Git SHA")}`).join("<br>") || "Approved-document scope only"}</p><p>Skills: ${s.skills.map((p) => `${esc(p.name)} · ${esc(p.hash?.slice(0, 12) || p.status)}`).join(", ") || "None"}</p><p>Permissions: ${s.readOnly ? "Read only" : "Assigned worktree writes"}; no shell or nested agents. MCP: ${esc(s.capabilities.mcp?.stage || "none")}</p><small>Attempt ${esc(run.attemptNumber)} · Logical run ${esc(run.logicalRunId)}</small></details>`;
+}
 function runCard(run) {
   const task = state.tasks.find((t) => t.id === run.taskId);
-  const waiting = [
-    "PAUSED",
-    "INTERRUPTED",
-    "WAITING_INPUT",
-    "FAILED",
-    "COMPLETED",
-  ].includes(run.state);
+  const waiting =
+    ["PAUSED", "INTERRUPTED", "WAITING_INPUT", "FAILED", "COMPLETED"].includes(run.state) &&
+    !(run.contractVersion === 1 && run.state === "COMPLETED") &&
+    !(run.purpose === "jira_appendix_generation" && run.state === "COMPLETED");
   const role = roleFor(run);
   const output =
-    (run.state === "FAILED"
-      ? run.summary
-      : liveOutput.get(run.id) || run.summary) ||
+    (run.state === "FAILED" ? run.summary : liveOutput.get(run.id) || run.summary) ||
     (run.state === "RUNNING"
       ? "The session is running. Live output is temporary; save points preserve essential context."
       : "No summary is available yet. Inspect the preserved worktree and save points before continuing.");
-  return `<section class="panel run-card ${role.key}"><div class="row-head"><div class="run-identity"><span class="role-avatar">${icon(role.key)}</span><div><small>${role.label} · ${runtimeName(run.runtime)}</small><h3>${esc(task?.title || run.purpose)}</h3></div></div>${badge(run.state)}</div>${run.pid ? `<small class="truncate" title="${esc(run.cwd)}">Process ${run.pid} · ${esc(run.cwd)}</small>` : ""}${["PAUSED", "INTERRUPTED"].includes(run.state) ? `<div class="savepoint-note">${icon("clock")}<div><strong>Progress preserved</strong><small>Last Save Point${run.updatedAt ? ` · ${time(run.updatedAt)}` : ""}. Continue when you are ready.</small></div></div>` : ""}<pre class="run-output" data-output="${run.id}" tabindex="0" aria-label="Agent response">${esc(responseText(output))}</pre><div class="task-actions">${run.state === "RUNNING" ? button("Pause", "PAUSE_AGENT", { "run-id": run.id }) + button("Interrupt", "INTERRUPT_AGENT", { "run-id": run.id }, "danger") : ""}${waiting && task?.state !== "COMPLETED" ? button("Continue", "CONTINUE_AGENT", { "run-id": run.id }, "primary small") : ""}${button("Save checkpoint", "checkpoint", { "run-id": run.id }, "small")}</div>${waiting ? `<form data-form="message" data-run="${run.id}"><label>Instruction for this agent<textarea name="message" rows="2" required placeholder="Clarify a decision or give the next instruction…"></textarea></label><button class="btn small" type="submit">Send instruction ↗</button><div class="form-error" role="alert"></div></form>` : "<small>Pause the current turn to send a new instruction.</small>"}</section>`;
+  return `<section class="panel run-card ${role.key}"><div class="row-head"><div class="run-identity"><span class="role-avatar">${icon(role.key === "jira_appendix" ? "jira" : role.key)}</span><div><small>${role.label} · ${runtimeName(run.runtime)}</small><h3>${esc(run.displayName || task?.title || run.purpose)}</h3></div></div>${badge(run.state)}</div>${run.purpose === "jira_appendix_generation" ? `<div class="panel-body"><small>Skill: ${esc(run.skill || "create-appendix-task-list")} · ${esc(run.phase || run.state)}<br>Model: ${esc(run.actualModel || run.resolvedModel || "Unavailable")} · ${esc(run.resolvedEffort || "Unavailable")}<br>Elapsed: <span data-agent-elapsed data-start="${esc(run.startedAt || run.createdAt)}" data-end="${esc(run.finishedAt || (run.state !== "RUNNING" ? run.updatedAt : "") || "")}">${Math.max(0, Math.floor((Date.parse(run.finishedAt || (run.state !== "RUNNING" && run.updatedAt) || new Date().toISOString()) - Date.parse(run.startedAt || run.createdAt)) / 1000))}s</span> · Last progress: ${run.lastProgressAt ? time(run.lastProgressAt) : "Awaiting process"}</small></div>` : ""}${run.pid ? `<small class="truncate" title="${esc(run.cwd)}">Process ${run.pid} · ${esc(run.cwd)}</small>` : ""}${["PAUSED", "INTERRUPTED"].includes(run.state) ? `<div class="savepoint-note">${icon("clock")}<div><strong>Progress preserved</strong><small>Last Save Point${run.updatedAt ? ` · ${time(run.updatedAt)}` : ""}. Continue when you are ready.</small></div></div>` : ""}<pre class="run-output" data-output="${run.id}" tabindex="0" aria-label="Agent response">${esc(responseText(output))}</pre>${agentProfileDetails(run)}${run.accessPreflight ? `<details class="panel-body"><summary>Repository access: ${esc(run.accessPreflight.status)}</summary><pre class="document">${esc(JSON.stringify({ ...run.accessPreflight, arguments: run.cliArguments }, null, 2))}</pre></details>` : ""}${run.route ? `<details class="panel-body"><summary>Model routing & usage</summary><p>${esc(run.role)} · ${esc(run.runtime)} · requested ${esc(run.requestedModel)} / ${esc(run.requestedEffort)} · resolved ${esc(run.resolvedModel)} / ${esc(run.resolvedEffort)}</p><p>Runtime-reported model: ${esc(run.actualModel || "NOT_AVAILABLE")} · ${esc(run.route.complexity)} / ${esc(run.route.risk)}</p><p>${esc(run.route.reason)}</p><small>Input tokens: ${esc(run.usage?.input_tokens ?? "NOT_AVAILABLE")} · Output tokens: ${esc(run.usage?.output_tokens ?? "NOT_AVAILABLE")} · Cost: NOT_AVAILABLE · Duration: ${esc(run.durationMs ?? "NOT_AVAILABLE")} ms</small><p>Optimization bootstrap: ${esc(JSON.stringify(run.optimizations || {}))}</p></details>` : ""}<div class="task-actions">${run.state === "RUNNING" ? button("Pause", "PAUSE_AGENT", { "run-id": run.id }) + button(run.purpose === "jira_appendix_generation" ? "Cancel generation" : "Interrupt", run.purpose === "jira_appendix_generation" ? "CANCEL_APPENDIX" : "INTERRUPT_AGENT", { "run-id": run.id }, "danger") : ""}${waiting && task?.state !== "COMPLETED" ? button("Continue", "CONTINUE_AGENT", { "run-id": run.id }, "primary small") : ""}${run.purpose === "jira_appendix_generation" && ["WAITING_INPUT", "PAUSED", "INTERRUPTED"].includes(run.state) ? button("Cancel generation", "CANCEL_APPENDIX", { "run-id": run.id }, "danger small") : ""}${button("Save checkpoint", "checkpoint", { "run-id": run.id }, "small")}</div>${waiting ? `<form data-form="message" data-run="${run.id}"><label>Instruction for this agent<textarea name="message" rows="2" required placeholder="Clarify a decision or give the next instruction…"></textarea></label><button class="btn small" type="submit">Send instruction ↗</button><div class="form-error" role="alert"></div></form>` : `<small>${(run.contractVersion === 1 || run.purpose === "jira_appendix_generation") && ["COMPLETED", "CANCELLED"].includes(run.state) ? "Use the Quest actions to review or regenerate the appendix." : "Pause the current turn to send a new instruction."}</small>`}</section>`;
 }
 function jira() {
   const tasks = state.tasks.filter((t) => t.jira);
   return (
-    head(
-      "Jira tasks",
-      "Your approved plans, published with an explicit action.",
-    ) +
+    head("Jira tasks", "Your approved plans, published with an explicit action.") +
     panel(
       "Published tasks",
       tasks.length
@@ -459,8 +446,157 @@ function settings() {
       "Settings & integrations",
       "Local tools power your workspace. Credentials stay with their providers.",
     ) +
-    `<div class="setting-grid">${panel("Workspace", `<div class="panel-body"><p>Data directory</p><div class="code">${esc(state.settings.dataDir)}</div><p>Base branch <strong>development</strong> · Maximum active sessions <strong>${state.settings.concurrency}</strong></p>${button("Reconcile saved state", "RECONCILE", {}, "small")}</div>`)}${panel("Agent runtimes", agentsPanel())}${panel("Jira publishing skill", `<div class="panel-body">${badge(state.settings.jiraConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Uses your local /upload-task-to-jira skill and Claude Code’s Atlassian connection. Review each sample or batch before publishing more.</p><small>See docs/integrations.md for the bridge contract.</small></div>`)}${panel("Confluence", `<div class="panel-body">${badge(state.settings.confluenceConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Import a main page and one level of directly linked pages. Credentials come from the configured environment or authentication provider.</p><small>Review the imported page list before generating a TRD.</small></div>`)}${panel("GitHub", `<div class="panel-body"><h3>Uses your existing GitHub CLI login</h3><p>Each repository work produces one PR to development. Generate an office commit message, create the PR, request reviewers, then notify Google Chat. Each publication has its own action.</p><div class="code">gh auth login</div></div>`)}${panel("Google Chat", `<div class="panel-body">${badge(state.settings.chatConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Set googleChat.webhookEnv to the environment variable holding your webhook. Requests retain a receipt and a stable retry ID.</p></div>`)}${panel("Local skills", `<div class="panel-body"><p>${esc((state.settings.localSkills || []).join(", ") || "Configure workflow.skills with local SKILL.md paths.")}</p></div>`)}${panel("Local configuration", `<div class="panel-body"><p>Machine-level integration settings are read at startup. Configure executables in your local config, then restart DevQuest.</p><div class="code">~/.devquest/config.json</div><small>Keep tokens out of this file. See README.md for setup.</small></div>`)}</div>`
+    `<div class="setting-grid">${panel("Jira Configuration", workspaceJiraForm())}${panel("Workspace", `<div class="panel-body"><p>Data directory</p><div class="code">${esc(state.settings.dataDir)}</div><p>Repository base and PR target are configured per repository · Maximum active sessions <strong>${state.settings.concurrency}</strong></p>${button("Reconcile saved state", "RECONCILE", {}, "small")}</div>`)}${panel("Agent runtimes", agentsPanel())}${panel("Jira publishing skill", `<div class="panel-body">${badge(state.settings.jiraConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Uses your local /upload-task-to-jira skill and Claude Code’s Atlassian connection. Review each sample or batch before publishing more.</p><small>See docs/integrations.md for the bridge contract.</small></div>`)}${panel("Confluence", `<div class="panel-body">${badge(state.settings.confluenceConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Import a main page and one level of directly linked pages. Credentials come from the configured environment or authentication provider.</p><small>Review the imported page list before generating a TRD.</small></div>`)}${panel("GitHub", `<div class="panel-body"><h3>Uses your existing GitHub CLI login</h3><p>Each repository work produces one PR to its configured target. Generate an office commit message, create the PR, request reviewers, then notify Google Chat. Each publication has its own action.</p><div class="code">gh auth login</div></div>`)}${panel("Google Chat", `<div class="panel-body">${badge(state.settings.chatConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Set googleChat.webhookEnv to the environment variable holding your webhook. Requests retain a receipt and a stable retry ID.</p></div>`)}${panel("Local skills", `<div class="panel-body"><p>${esc((state.settings.localSkills || []).join(", ") || "Configure workflow.skills with local SKILL.md paths.")}</p></div>`)}${panel("Local configuration", `<div class="panel-body"><p>Machine-level integration settings are read at startup. Configure executables in your local config, then restart DevQuest.</p><div class="code">~/.devquest/config.json</div><small>Keep tokens out of this file. See README.md for setup.</small></div>`)}</div>`
   );
+}
+function appendixAttempt(id) {
+  const managed = state.runs.filter(
+    (r) => r.questId === id && r.purpose === "jira_appendix_generation",
+  );
+  const preflight = (state.operations || []).find((op) => op.id === `appendix-preflight:${id}`);
+  if (
+    preflight &&
+    (preflight.state === "RUNNING" ||
+      (preflight.state === "FAILED" &&
+        (!managed.length || preflight.startedAt >= managed.at(-1).createdAt)))
+  )
+    return preflight;
+  const legacy = (state.operations || []).find((op) => op.id === `appendix:${id}`);
+  return (
+    managed.find((r) => r.generationActive === true) ||
+    (legacy?.generationActive === true ? legacy : managed.at(-1) || legacy)
+  );
+}
+function appendixStatus(quest) {
+  const attempt = appendixAttempt(quest.id);
+  const operation = attempt ? { ...attempt, error: attempt.error || attempt.summary } : null;
+  const doc = artifact(quest.id, "appendix");
+  if (!operation && !doc) return "";
+  const running = operation?.generationActive === true;
+  const failed = operation && ["INTERRUPTED", "FAILED"].includes(operation.state);
+  const title = running
+    ? operation.phase?.startsWith("VERIFY")
+      ? "Checking Jira configuration…"
+      : "Generating Jira Appendix…"
+    : failed
+      ? "Jira Appendix Generation"
+      : operation?.state === "CANCELLED"
+        ? "Jira Appendix generation cancelled"
+        : operation?.state === "WAITING_INPUT"
+          ? "Jira Appendix Agent needs input"
+          : "Jira Appendix generated successfully";
+  return panel(
+    title,
+    `<div class="panel-body" role="status" aria-live="polite">${failed ? `<p><strong>Status: FAILED</strong></p><details><summary>View Error</summary><pre class="document">${esc(operation.error || "Generation interrupted")}</pre></details>` : ""}${failed || operation?.state === "WAITING_INPUT" ? `<p class="warning">${esc(/timed out after 120000ms/.test(operation.error || "") ? "Claude execution timed out after 120 seconds." : operation.error || "Generation was interrupted. Retry generation; the previous appendix is preserved.")}</p>` : `<p>${running ? "The integrated skill is running. No Jira issues will be created." : operation?.state === "CANCELLED" ? "Previous appendix revisions are preserved. Regenerate when ready." : "Review generated tasks before publishing."}</p>`}${operation ? `<p>${esc(operation.phase || operation.state)} · ${esc(operation.runtime || "Claude Code")} · ${esc(operation.resolvedModel || operation.model || "configured model")} · ${esc(operation.resolvedEffort || operation.effort || "configured effort")}</p>` : ""}${operation?.skill ? `<small>Skill: ${esc(operation.skill)} · ${esc(operation.runtime || "configured runtime")}</small>` : ""}${
+      running
+        ? (() => {
+            const previous = [
+              ...state.runs.filter(
+                (r) =>
+                  r.questId === quest.id &&
+                  r.purpose === "jira_appendix_generation" &&
+                  r.id !== operation.id,
+              ),
+              ...(state.operations || []).filter(
+                (o) => o.id === `appendix:${quest.id}` && o.id !== operation.id,
+              ),
+            ]
+              .filter((r) => ["FAILED", "INTERRUPTED"].includes(r.state))
+              .at(-1);
+            return previous
+              ? `<details><summary>Previous attempt error</summary><pre class="document">${esc(previous.error || previous.summary)}</pre></details>`
+              : "";
+          })()
+        : ""
+    }${doc ? `<p><a class="btn small" href="#quest/${quest.id}/appendix">View Appendix</a></p>` : ""}</div>`,
+  );
+}
+function savedJiraContext(quest) {
+  const context = quest.jiraContext || {};
+  const verified = (state.operations || []).find(
+    (op) => op.id === `jira-verify:${quest.id}`,
+  )?.capabilities;
+  return verified?.contextKey === JSON.stringify(context)
+    ? {
+        ...context,
+        siteUrl: context.siteUrl || verified.siteUrl,
+        projectUrl: context.projectUrl || verified.projectUrl,
+      }
+    : context;
+}
+function workspaceJira() {
+  return state.settings.jiraWorkspace || { version: 0, defaultProject: "", projects: {} };
+}
+function jiraFields(context, workspace = false) {
+  const w = context.backendWeights;
+  return `<div data-jira-fields><div class="form-row"><label>Jira project key<input name="project" list="${workspace ? "workspace-jira-projects" : "quest-jira-projects"}" required value="${esc(context.project || "")}"><datalist id="${workspace ? "workspace-jira-projects" : "quest-jira-projects"}">${Object.keys(
+    workspaceJira().projects,
+  )
+    .map((p) => `<option value="${esc(p)}"></option>`)
+    .join(
+      "",
+    )}</datalist></label><label>Jira site URL<input name="siteUrl" type="url" required value="${esc(context.siteUrl || "")}" placeholder="https://your-team.atlassian.net"></label></div><label>Project URL<input name="projectUrl" type="url" required value="${esc(context.projectUrl || "")}"></label>${workspace ? "" : `<label>Jira Epic (optional)<input name="epic" value="${esc(context.epic || "")}"></label>`}<div class="form-row"><label>Appendix category family<select name="categoryFamily">${["BE", "MOB", "ALL"].map((f) => `<option${(context.categoryFamily || "ALL") === f ? " selected" : ""}>${f}</option>`).join("")}</select></label><label>Atlassian MCP server<input name="mcpServer" required value="${esc(context.mcpServer || "atlassian")}"></label></div><label>Assignee (optional)<input name="assignee" value="${esc(context.assignee || "")}"></label><details${workspace && context.categoryFamily === "BE" ? " open" : ""}><summary>Backend weight reference — project-specific, User Confirmed</summary><div class="panel-body"><div class="form-row">${["V", "L", "M", "H"].map((k) => `<label>BE-${k} points<input name="weight${k}" type="number" min="1" max="16" value="${esc(w?.levels?.[k] || "")}"></label>`).join("")}</div><div class="form-row"><label>Reference version<input name="weightVersion" value="${esc(w?.version || "1.0.0")}"></label><label>Scale<input name="weightScale" value="${esc(w?.scale || "User Confirmed")}"></label></div><small>Saving numeric values confirms this reference for this project. Exact Jira labels and option IDs are fetched live; they are never replaced with Mobile categories.</small></div></details><label>Weight reference / supporting notes<textarea name="weightReference" rows="3">${esc(context.weightReference || "")}</textarea></label><label>Live metadata timeout (seconds)<input name="metadataTimeout" type="number" min="10" max="120" value="${esc(context.metadataPreferences?.timeoutSeconds || 60)}"></label><small>Jira Specialist uses Claude Code and its existing agent model policy (Sonnet / medium by default). Model overrides remain in agent execution settings. Live metadata and native skill availability are checked before generation.</small></div>`;
+}
+function workspaceJiraForm(project = workspaceJira().defaultProject) {
+  const w = workspaceJira(),
+    p = w.projects[project] || { project: "" };
+  return `<form class="panel-body" data-form="workspace-jira"><p>Project defaults · version ${w.version}. Existing Quests keep their saved settings.</p>${jiraFields(p, true)}<label>Repository associations (optional)</label><div class="checks">${state.repositories.map((r) => `<label><input type="checkbox" name="jiraRepositoryIds" value="${r.id}"${p.repositoryIds?.includes(r.id) ? " checked" : ""}>${esc(r.name)}</label>`).join("")}</div><label class="checks"><input type="checkbox" name="makeDefault"${w.defaultProject === project || !w.defaultProject ? " checked" : ""}>Use as Workspace default project</label><input type="hidden" name="expectedVersion" value="${w.version}"><div class="form-error" role="alert"></div><button class="btn primary" type="submit">Save Jira defaults</button></form>`;
+}
+function jiraInput(values) {
+  const project = String(values.get("project") || "").trim();
+  const result = Object.fromEntries(
+    ["project", "siteUrl", "projectUrl", "epic", "assignee", "weightReference"].map((k) => [
+      k,
+      values.get(k) || "",
+    ]),
+  );
+  if (values.get("categoryFamily")) result.categoryFamily = values.get("categoryFamily");
+  if (values.get("mcpServer")) result.mcpServer = values.get("mcpServer");
+  if (values.get("metadataTimeout"))
+    result.metadataPreferences = {
+      mode: "live",
+      timeoutSeconds: Number(values.get("metadataTimeout")),
+    };
+  if (values.get("categoryFamily"))
+    result.backendWeights = ["V", "L", "M", "H"].some((k) => values.get(`weight${k}`))
+      ? {
+          project,
+          name: `${project} Backend Appendix Weights`,
+          version: values.get("weightVersion"),
+          source: "User Confirmed",
+          scale: values.get("weightScale"),
+          family: "BE",
+          levels: Object.fromEntries(
+            ["V", "L", "M", "H"].map((k) => [k, Number(values.get(`weight${k}`))]),
+          ),
+        }
+      : null;
+  return result;
+}
+function questJiraDefault(repositoryIds = state.repositories.map((r) => r.id)) {
+  const w = workspaceJira(),
+    matches = Object.values(w.projects).filter((p) =>
+      p.repositoryIds?.some((id) => repositoryIds.includes(id)),
+    );
+  return matches.length > 1 ? "" : matches[0]?.project || w.defaultProject;
+}
+function questJiraFields() {
+  const w = workspaceJira(),
+    p = w.projects[questJiraDefault()] || {};
+  return `<details open><summary>Jira configuration</summary><div class="panel-body"><label class="checks"><input type="checkbox" name="jiraEnabled"${p.project ? " checked" : ""}>Use Jira integration</label><div data-jira-config${p.project ? "" : " hidden"}><p>Prefilled from Workspace / project defaults. Epic stays specific to this Quest.</p>${jiraFields(p)}</div></div></details>`;
+}
+function editJira(quest) {
+  return dialog(
+    "Edit Jira Configuration",
+    `<input type="hidden" name="questId" value="${esc(quest.id)}">${jiraFields({ ...quest.jiraConfig, ...savedJiraContext(quest) })}<p>${button("Refresh inherited defaults", "REFRESH_QUEST_JIRA", { "quest-id": quest.id }, "small")}</p><small>Refresh preserves explicit Quest overrides and Epic. Saving requires fresh appendix approval; generation and publication are separate actions.</small>`,
+    "jira-settings",
+    "Save settings",
+  );
+}
+function jiraSummary(quest) {
+  const c = quest.jiraContext || {},
+    j = quest.jiraConfig || {};
+  return `<div class="panel-body"><strong>Jira configuration</strong><p>Project: ${esc(c.project || "Not configured")} · Epic: ${esc(c.epic || "None (optional)")} · Category: ${esc(j.categoryFamily || "Legacy / all")} · Weight Reference: ${esc(j.backendWeights?.scale || (c.weightReference ? "Saved reference" : "Not configured"))} · Metadata: ${quest.jiraMetadata ? "Verified " + esc(quest.jiraMetadata.checkedAt) : "Unverified"}</p><small>${j.enabled === false ? "Jira integration is disabled or awaiting configuration." : `Snapshot version ${j.workspaceVersion ?? "legacy"}; Workspace updates require an explicit refresh.`}</small></div>`;
 }
 function questView(id, tab = "overview") {
   const quest = state.quests.find((q) => q.id === id);
@@ -473,43 +609,49 @@ function questView(id, tab = "overview") {
   const tasks = questTasks(id),
     works = state.works.filter((w) => w.questId === id),
     runs = state.runs.filter((r) => r.questId === id);
-  const tabs = [
-    "overview",
-    "architect",
-    "tasks",
-    "repositories",
-    "artifacts",
-    "activity",
-  ];
+  const appendixJob = appendixAttempt(id);
+  const appendixRunning = appendixJob?.generationActive === true;
+  const appendixFailed = appendixJob && ["FAILED", "INTERRUPTED"].includes(appendixJob.state);
+  const appendixReady =
+    artifact(id, "appendix")?.planArtifactId === artifact(id, "plan")?.id &&
+    Boolean(artifact(id, "appendix"));
+  const appendixApproved = artifact(id, "appendix")?.approved === true;
+  const tabs = ["overview", "architect", "tasks", "repositories", "artifacts", "activity"];
   let body = "";
   if (tab === "overview") {
-    let next = "";
-    const runtime = `<select id="quest-runtime" aria-label="Architect runtime">${runtimeOptions()}</select>`;
+    let next = `<details><summary>Agent Profiles · ${quest.agentProfiles?.enabled ? "Enabled" : "Legacy"}</summary><p>Versioned engineering guidance. Existing models, permissions and review gates remain authoritative. Adopt only while sessions are finished.</p>${button(quest.agentProfiles?.enabled ? "Refresh reviewed profile versions" : "Enable reviewed Agent Profiles", "SET_AGENT_PROFILES", { "quest-id": id, enabled: "true" }, "small")}${quest.agentProfiles?.enabled ? button("Disable for future runs", "SET_AGENT_PROFILES", { "quest-id": id, enabled: "false" }, "small") : ""}</details>`;
+    const runtime =
+      quest.workflowVersion === 2
+        ? ""
+        : `<select id="quest-runtime" aria-label="Architect runtime">${runtimeOptions()}</select>`;
     const active = runs.some((r) =>
-      ["RUNNING", "PAUSED", "INTERRUPTED", "WAITING_INPUT"].includes(r.state),
+      r.purpose === "jira_appendix_generation"
+        ? r.generationActive === true
+        : ["RUNNING", "PAUSED", "INTERRUPTED", "WAITING_INPUT"].includes(r.state),
     );
     if (!active) {
-      if (quest.kind === "TECH" && !artifact(id, "technical-brief"))
-        next += button(
-          "Start brainstorm",
-          "START_BRAINSTORM",
-          { "quest-id": id },
-          "primary",
-        );
+      if (quest.kind === "TECH" && quest.state === "BRAINSTORM_COMPLETED")
+        next +=
+          `<a class="btn small" href="#quest/${id}/architect">View Specification</a>` +
+          button("Edit Specification", "edit-spec", { "quest-id": id }, "small");
+      if (
+        quest.kind === "TECH" &&
+        !artifact(id, "technical-brief") &&
+        artifact(id, "spec")?.sourceStage !== "brainstorm"
+      )
+        next += button("Start brainstorm", "START_BRAINSTORM", { "quest-id": id }, "primary");
       if (
         quest.kind === "TECH" &&
         artifact(id, "brainstorm") &&
-        !artifact(id, "technical-brief")
+        !artifact(id, "technical-brief") &&
+        artifact(id, "spec")?.sourceStage !== "brainstorm"
       )
-        next += button(
-          "Finish brainstorm",
-          "FINISH_BRAINSTORM",
-          { "quest-id": id },
-          "primary",
-        );
+        next += button("Finish brainstorm", "FINISH_BRAINSTORM", { "quest-id": id }, "primary");
       if (
         !artifact(id, "analysis") &&
-        (quest.kind === "PRODUCT" || artifact(id, "technical-brief"))
+        (quest.kind === "PRODUCT" ||
+          artifact(id, "technical-brief") ||
+          artifact(id, "spec")?.sourceStage === "brainstorm")
       )
         next += button(
           "Analyze requirements & repositories",
@@ -518,56 +660,55 @@ function questView(id, tab = "overview") {
           "primary",
         );
       if (artifact(id, "analysis") && !artifact(id, "trd"))
-        next += button(
-          "Generate TRD",
-          "GENERATE_TRD",
-          { "quest-id": id },
-          "primary",
-        );
+        next += button("Generate TRD", "GENERATE_TRD", { "quest-id": id }, "primary");
       if (quest.state === "TRD_DRAFT")
-        next += button(
-          "Approve TRD",
-          "APPROVE_TRD",
-          { "quest-id": id },
-          "primary",
-        );
+        next += button("Approve TRD", "APPROVE_TRD", { "quest-id": id }, "primary");
       if (quest.state === "TRD_APPROVED")
         next +=
-          button(
-            "Generate plan",
-            "GENERATE_PLAN",
-            { "quest-id": id },
-            "primary",
-          ) + button("Write plan manually", "edit-plan", { "quest-id": id });
+          button("Generate plan", "GENERATE_PLAN", { "quest-id": id }, "primary") +
+          button("Write plan manually", "edit-plan", { "quest-id": id });
       if (quest.state === "PLAN_DRAFT")
-        next += button(
-          "Approve plan",
-          "APPROVE_PLAN",
-          { "quest-id": id },
-          "primary",
-        );
+        next += button("Approve plan", "APPROVE_PLAN", { "quest-id": id }, "primary");
       if (quest.state === "PLAN_APPROVED")
         next +=
-          button(
-            "Generate Jira appendix",
-            "appendix-dialog",
-            { "quest-id": id },
-            "small",
-          ) +
-          button(
-            "Import Jira appendix",
-            "edit-appendix",
-            { "quest-id": id },
-            "small",
-          ) +
-          button(
-            tasks.some((t) => t.jira)
-              ? "Publish next Jira batch (up to 5)"
-              : "Publish Jira sample",
-            "PUBLISH_JIRA",
-            { "quest-id": id },
-            "primary",
-          );
+          (appendixRunning
+            ? '<button class="btn small" disabled>Generating Jira Appendix…</button>'
+            : button(
+                appendixFailed
+                  ? "Retry Generation"
+                  : artifact(id, "appendix")
+                    ? "Regenerate Appendix"
+                    : "Generate Jira appendix",
+                "appendix-dialog",
+                { "quest-id": id },
+                "small",
+              )) +
+          button("Edit Jira Configuration", "jira-settings", { "quest-id": id }, "small") +
+          (appendixReady && appendixApproved
+            ? button(
+                "Prepare Jira publication",
+                "VERIFY_JIRA_PROJECT",
+                { "quest-id": id, "artifact-id": artifact(id, "appendix").id },
+                "small",
+              )
+            : "") +
+          button("Import Jira appendix", "edit-appendix", { "quest-id": id }, "small") +
+          (appendixReady && !appendixRunning && !appendixApproved
+            ? `<a class="btn small" href="#quest/${id}/artifacts">Review Markdown</a>` +
+              appendixApprovalButton(artifact(id, "appendix"), "primary")
+            : "") +
+          (appendixReady && appendixApproved && !appendixRunning
+            ? artifact(id, "appendix")?.publicationReady === false
+              ? `<button class="btn small" disabled title="${esc(artifact(id, "appendix").publicationError)}">Publish to Jira</button><small role="status">${esc(artifact(id, "appendix").publicationError)}</small>`
+              : button(
+                  tasks.some((t) => t.jira)
+                    ? "Publish next Jira batch (up to 5)"
+                    : "Publish to Jira (sample)",
+                  "PUBLISH_JIRA",
+                  { "quest-id": id },
+                  "primary",
+                )
+            : "");
       if (quest.state === "PLAN_APPROVED" && !tasks.some((t) => t.jira))
         next += button("Use existing Jira task", "existing-jira-dialog", {
           "quest-id": id,
@@ -576,28 +717,15 @@ function questView(id, tab = "overview") {
     if (
       quest.kind === "TECH" &&
       !artifact(id, "technical-brief") &&
-      runs.some(
-        (r) => r.purpose === "brainstorm" && r.state === "WAITING_INPUT",
-      )
+      artifact(id, "spec")?.sourceStage !== "brainstorm" &&
+      runs.some((r) => r.purpose === "brainstorm" && r.state === "WAITING_INPUT")
     )
-      next += button(
-        "Finish brainstorm",
-        "FINISH_BRAINSTORM",
-        { "quest-id": id },
-        "primary",
-      );
+      next += button("Finish brainstorm", "FINISH_BRAINSTORM", { "quest-id": id }, "primary");
     if (["TASKS_PUBLISHED", "EXECUTING"].includes(quest.state))
       next +=
-        button(
-          "⚑ Execute Quest",
-          "EXECUTE_QUEST",
-          { "quest-id": id },
-          "primary",
-        ) +
-        (quest.autoExecute
-          ? button("Pause scheduling", "PAUSE_QUEST", { "quest-id": id })
-          : "");
-    body = `<section class="next-step"><div>${icon("spark")}<div><h2>${quest.state === "PRS_CREATED" ? "Quest complete" : "Next step"}</h2><p>${quest.state === "PRS_CREATED" ? "All pull requests and configured review requests are complete." : quest.state === "REVIEW_HANDOFF" ? "Open Repositories to request reviewers and notify Google Chat." : active ? "An agent session needs to finish or continue." : "Review your artifacts and choose the next action."}</p></div></div><div class="toolbar">${next}${next ? runtime : ""}</div>${quest.warnings?.length ? `<div class="warning">${quest.warnings.map(esc).join("<br>")}<label class="checks"><input type="checkbox" id="accept-warnings">Continue with incomplete source context</label></div>` : ""}</section><div class="grid-main quest-overview"><div class="stack">${panel(`${icon("document")} Quest summary`, `<pre class="document brief-document">${esc(artifact(id, quest.kind === "PRODUCT" ? "prd" : "technical-brief")?.content || artifact(id, "idea")?.content || "")}</pre>`, `<a class="subtle-link" href="#quest/${id}/architect">Design documents ${icon("arrow")}</a>`)}${panel(`${icon("repository")} Affected repositories`, repositoryCards(quest), `<span class="panel-count">${quest.repositoryIds.length} repositories</span>`)}${panel(`${icon("jira")} Jira tasks & objectives`, questTaskTable(quest), `<a class="subtle-link" href="#quest/${id}/tasks">Execution queue ${icon("arrow")}</a>`)}</div><div class="stack">${panel(`${icon("party")} Agent party`, partyCards(runs))}${runs.length ? runs.slice(-2).reverse().map(runCard).join("") : panel(`${icon("developer")} Active agent`, empty(icon("developer"), "Your party is standing by", "Start the next step to bring an agent into this Quest."))}${panel(`${icon("clock")} Recent activity`, activity(state.events.filter((e) => e.questId === id)), `<a class="subtle-link" href="#quest/${id}/activity">View all ${icon("arrow")}</a>`)}${quest.sources?.length ? panel("Context loaded", `<div class="source-list">${quest.sources.map((source) => `<p><a href="${safeUrl(source.url)}" target="_blank" rel="noreferrer">${esc(source.title)} ↗</a><small>Version ${esc(source.version)}</small></p>`).join("")}</div>`) : ""}</div></div>`;
+        button("⚑ Execute Quest", "EXECUTE_QUEST", { "quest-id": id }, "primary") +
+        (quest.autoExecute ? button("Pause scheduling", "PAUSE_QUEST", { "quest-id": id }) : "");
+    body = `<section class="next-step"><div>${icon("spark")}<div><h2>${quest.state === "PRS_CREATED" ? "Quest complete" : quest.state === "BRAINSTORM_COMPLETED" ? "Brainstorm completed" : "Next step"}</h2><p>${quest.state === "PRS_CREATED" ? "All pull requests and configured review requests are complete." : quest.state === "BRAINSTORM_COMPLETED" ? "spec.md is saved. View or edit it, then choose Analyze when ready." : quest.state === "REVIEW_HANDOFF" ? "Open Repositories to request reviewers and notify Google Chat." : active ? "An agent session needs to finish or continue." : "Review your artifacts and choose the next action."}</p></div></div><div class="toolbar">${next}${next ? runtime : ""}</div>${quest.warnings?.length ? `<div class="warning">${quest.warnings.map(esc).join("<br>")}<label class="checks"><input type="checkbox" id="accept-warnings">Continue with incomplete source context</label></div>` : ""}</section><div class="grid-main quest-overview"><div class="stack">${panel(`${icon("document")} Quest summary`, `<pre class="document brief-document">${esc((quest.kind === "TECH" && artifact(id, "spec")?.sourceStage === "brainstorm" ? artifact(id, "spec") : artifact(id, quest.kind === "PRODUCT" ? "prd" : "technical-brief"))?.content || artifact(id, "idea")?.content || "")}</pre>`, `<a class="subtle-link" href="#quest/${id}/architect">Design documents ${icon("arrow")}</a>`)}${panel(`${icon("repository")} Affected repositories`, repositoryCards(quest), `<span class="panel-count">${quest.repositoryIds.length} repositories</span>`)}${panel(`${icon("jira")} Jira tasks & objectives`, questTaskTable(quest), `<a class="subtle-link" href="#quest/${id}/tasks">Execution queue ${icon("arrow")}</a>`)}</div><div class="stack">${panel(`${icon("party")} Agent party`, partyCards(runs))}${runs.length ? runs.slice(-2).reverse().map(runCard).join("") : panel(`${icon("developer")} Active agent`, empty(icon("developer"), "Your party is standing by", "Start the next step to bring an agent into this Quest."))}${panel(`${icon("clock")} Recent activity`, activity(state.events.filter((e) => e.questId === id)), `<a class="subtle-link" href="#quest/${id}/activity">View all ${icon("arrow")}</a>`)}${quest.sources?.length ? panel("Context loaded", `<div class="source-list">${quest.sources.map((source) => `<p><a href="${safeUrl(source.url)}" target="_blank" rel="noreferrer">${esc(source.title)} ↗</a><small>Version ${esc(source.version)}</small></p>`).join("")}</div>`) : ""}</div></div>`;
   }
   if (tab === "tasks")
     body = panel(
@@ -606,14 +734,10 @@ function questView(id, tab = "overview") {
         ? tasks
             .map(
               (task) =>
-                `<article class="task-card"><div class="row-head"><h3>${esc(task.key)} · ${esc(task.title)}</h3>${badge(task.state)}</div><div class="row-meta"><span>▱ ${esc(repository(task.repoId)?.name)}</span><span>${esc(task.jira?.key || "Not published")}</span><span>Validation: ${esc(task.validationProfile)}</span></div><p>Depends on: ${task.dependencies.length ? task.dependencies.map((key) => esc(state.tasks.find((t) => t.id === key)?.key)).join(", ") : "No dependencies"}</p>${task.validation ? `<pre class="run-output">${esc(task.validation.summary)}</pre>` : ""}<div class="task-actions"><select aria-label="Runtime for ${esc(task.key)}" data-task-runtime="${task.id}">${runtimeOptions()}</select>${task.state === "PUBLISHED" ? button("▶ Start", "START_TASK", { "quest-id": id, "task-id": task.id }, "primary small") : ""}${["AWAITING_TEST", "TEST_FAILED", "COMPLETED"].includes(task.state) ? button("Run tests", "RUN_TEST", { "quest-id": id, "task-id": task.id }, "small") : ""}${["COMPLETED", "TEST_FAILED"].includes(task.state) ? button("Reopen task", "REOPEN_TASK", { "quest-id": id, "task-id": task.id }, "small") : ""}</div></article>`,
+                `<article class="task-card"><div class="row-head"><h3>${esc(task.key)} · ${esc(task.title)}</h3>${badge(task.state)}</div><div class="row-meta"><span>▱ ${esc(repository(task.repoId)?.name)}</span><span>${esc(task.jira?.key || "Not published")}</span><span>Validation: ${esc(task.validationProfile)}</span></div><p>Depends on: ${task.dependencies.length ? task.dependencies.map((key) => esc(state.tasks.find((t) => t.id === key)?.key)).join(", ") : "No dependencies"}</p>${task.validation ? `<pre class="run-output">${esc(task.validation.summary)}</pre>` : ""}<div class="task-actions">${quest.workflowVersion === 2 ? "" : `<select aria-label="Runtime for ${esc(task.key)}" data-task-runtime="${task.id}">${runtimeOptions()}</select>`}${task.state === "PUBLISHED" ? button("▶ Start", "START_TASK", { "quest-id": id, "task-id": task.id }, "primary small") : ""}${["AWAITING_TEST", "TEST_FAILED", "COMPLETED"].includes(task.state) ? button("Run tests", "RUN_TEST", { "quest-id": id, "task-id": task.id }, "small") : ""}${quest.workflowVersion !== 2 && ["COMPLETED", "TEST_FAILED"].includes(task.state) ? button("Reopen task", "REOPEN_TASK", { "quest-id": id, "task-id": task.id }, "small") : ""}${quest.workflowVersion === 2 ? `${["FAILED", "INTERRUPTED", "CANCELLED", "NEEDS_HUMAN_ATTENTION"].includes(task.state) && !task.integratedCommit ? button("Retry preserved task", "RETRY_TASK", { "quest-id": id, "task-id": task.id }, "small") : ""}${["PREPARING", "RUNNING", "WAITING_INPUT"].includes(task.state) ? button("Cancel task", "CANCEL_TASK", { "quest-id": id, "task-id": task.id }, "danger small") : ""}<small>Model: ${esc(task.route?.resolvedModel || "Pending routing")} · Risk: ${esc(task.assessment?.risk || "NOT_AVAILABLE")} · Retries ${esc(task.retries || 0)} · Escalations ${esc(task.escalations || 0)}</small>${task.error ? `<pre class="document">${esc(task.error)}</pre>` : ""}` : ""}</div></article>`,
             )
             .join("")
-        : empty(
-            "☷",
-            "No tasks planned",
-            "Approve the TRD, then generate or write a plan.",
-          ),
+        : empty("☷", "No tasks planned", "Approve the TRD, then generate or write a plan."),
     );
   if (tab === "repositories")
     body = works.length
@@ -621,7 +745,7 @@ function questView(id, tab = "overview") {
           .map((work) =>
             panel(
               esc(repository(work.repoId)?.name),
-              `<div class="panel-body"><div class="row-head">${badge(work.state)}<span class="number">⑂ ${esc(work.branch)}</span></div><div class="code">${esc(work.path)}</div>${work.error ? `<div class="warning">${esc(work.error)}</div>` : ""}${work.review ? `<pre class="document">${esc(work.review.summary)}</pre>` : ""}<div class="toolbar">${!work.pr ? `<select aria-label="Reviewer runtime" data-work-runtime="${work.id}">${runtimeOptions()}</select>` : ""}${!work.pr ? button("Review repository", "REVIEW_REPOSITORY", { "quest-id": id, "work-id": work.id }, "small") : ""}${work.review && !work.pr ? button("Approve repository review", "APPROVE_REVIEW", { "quest-id": id, "work-id": work.id }, "small") : ""}${work.state === "READY_FOR_PR" ? button("Generate office commit message", "GENERATE_COMMIT_MESSAGE", { "quest-id": id, "work-id": work.id }, "small") + button("Create PR → development", "create-pr-dialog", { "quest-id": id, "work-id": work.id }, "primary") : ""}${work.pr && !work.notifiedAt && !work.notification ? button("Request reviewers", "reviewers-dialog", { "quest-id": id, "work-id": work.id }, "small") : ""}${work.reviewRequestedAt && !work.notifiedAt ? button("Notify Google Chat", "NOTIFY_REVIEW", { "quest-id": id, "work-id": work.id }, "small") : ""}${work.notifiedAt ? badge("TEAM_NOTIFIED") : work.reviewRequestedAt ? badge("REVIEW_REQUESTED") : ""}${work.pr ? `<a class="btn primary" target="_blank" rel="noreferrer" href="${safeUrl(work.pr.url)}">View pull request ↗</a>` : ""}</div></div>`,
+              `<div class="panel-body"><div class="row-head">${badge(work.state)}<span class="number">⑂ ${esc(work.branch)}</span></div><div class="code">${esc(work.path)}</div>${work.error ? `<div class="warning">${esc(work.error)}</div>` : ""}${work.baselineFailure ? `<div class="warning">Baseline check: ${esc(work.baselineFailure.profile)}${work.baselineFailure.changedFiles ? " · Tests changed worktree files" : ""}</div><pre class="document" tabindex="0" aria-label="Baseline test result">${esc(work.baselineFailure.summary)}</pre>` : ""}${work.review ? `<pre class="document">${esc(work.review.summary)}</pre>` : ""}${work.workflowVersion === 2 ? `<p>Integration: ${esc(work.integration?.state || work.state)} · Review/fix cycles ${esc(work.fixCycles || 0)}/3 · PR target ${esc(work.prTarget)}</p>${work.productionReview ? `<details><summary>Production review: ${esc(work.productionReview.verdict)}</summary><pre class="document">${esc(JSON.stringify(work.productionReview, null, 2))}</pre></details>` : ""}${!work.pr ? button("Change PR target", "pr-target", { "quest-id": id, "work-id": work.id }, "small") : ""}` : ""}<div class="toolbar">${!work.pr && work.workflowVersion !== 2 ? `<select aria-label="Reviewer runtime" data-work-runtime="${work.id}">${runtimeOptions()}</select>` : ""}${!work.pr ? button("Review repository", "REVIEW_REPOSITORY", { "quest-id": id, "work-id": work.id }, "small") : ""}${(work.review || work.productionReview?.verdict === "PASSED") && !work.pr ? button("Approve repository review", "APPROVE_REVIEW", { "quest-id": id, "work-id": work.id }, "small") : ""}${work.state === "READY_FOR_PR" ? (work.workflowVersion !== 2 ? button("Generate office commit message", "GENERATE_COMMIT_MESSAGE", { "quest-id": id, "work-id": work.id }, "small") : "") + button(`Create PR → ${work.prTarget || "development"}`, "create-pr-dialog", { "quest-id": id, "work-id": work.id }, "primary") : ""}${work.pr && !work.notifiedAt && !work.notification ? button("Request reviewers", "reviewers-dialog", { "quest-id": id, "work-id": work.id }, "small") : ""}${(work.reviewRequestedAt || (work.workflowVersion === 2 && work.pr && !work.reviewers?.length)) && !work.notifiedAt ? button("Notify Google Chat", "NOTIFY_REVIEW", { "quest-id": id, "work-id": work.id }, "small") : ""}${work.notifiedAt ? badge("TEAM_NOTIFIED") : work.reviewRequestedAt ? badge("REVIEW_REQUESTED") : ""}${work.pr ? `<a class="btn primary" target="_blank" rel="noreferrer" href="${safeUrl(work.pr.url)}">View pull request ↗</a>` : ""}</div></div>`,
             ),
           )
           .join('<div class="section-space"></div>')
@@ -630,15 +754,13 @@ function questView(id, tab = "overview") {
           empty(
             "▱",
             "Worktrees are prepared on first execution",
-            "Each repository will have its own branch, worktree and pull request.",
+            "Each repository will have an integration branch and pull request. v1.1 tasks use separate worktrees.",
           ),
         );
   if (tab === "architect") {
     const editable =
       !runs.some((run) =>
-        ["RUNNING", "WAITING_INPUT", "PAUSED", "INTERRUPTED"].includes(
-          run.state,
-        ),
+        ["RUNNING", "WAITING_INPUT", "PAUSED", "INTERRUPTED"].includes(run.state),
       ) && !tasks.some((task) => task.jira);
     body =
       `<p class="muted">Saved design documents for this Quest. Read the Markdown or download a copy. New revisions preserve earlier files.</p>` +
@@ -649,47 +771,38 @@ function questView(id, tab = "overview") {
         ["ticket", "Jira tickets"],
       ]
         .map(([kind, title]) => {
-          const doc =
-            artifact(id, kind) ||
-            (kind === "ticket" ? artifact(id, "appendix") : null);
+          const doc = artifact(id, kind) || (kind === "ticket" ? artifact(id, "appendix") : null);
           const stale =
             kind === "spec" &&
             doc &&
+            doc.sourceStage !== "brainstorm" &&
             doc.trdArtifactId !== artifact(id, "trd")?.id;
           let controls =
             doc && !doc.error
               ? `<a class="btn small" href="/api/artifacts/${encodeURIComponent(doc.id)}" download>Download .md</a>`
               : "";
-          if (doc && !doc.error)
-            controls = documentViewSelect(`${id}-${kind}`, title) + controls;
+          if (doc && !doc.error) controls = documentViewSelect(`${id}-${kind}`, title) + controls;
           if (editable && ["trd", "plan"].includes(kind) && doc)
-            controls += button(
-              "Edit",
-              `edit-${kind}`,
-              { "quest-id": id },
-              "small",
-            );
+            controls += button("Edit", `edit-${kind}`, { "quest-id": id }, "small");
           if (
             editable &&
             kind === "spec" &&
-            ["TRD_APPROVED", "PLAN_DRAFT", "PLAN_APPROVED"].includes(
-              quest.state,
-            )
+            doc?.sourceStage === "brainstorm" &&
+            quest.state === "BRAINSTORM_COMPLETED"
+          )
+            controls += button("Edit Specification", "edit-spec", { "quest-id": id }, "small");
+          if (
+            editable &&
+            !(quest.kind === "TECH" && quest.designProtocol === 1) &&
+            kind === "spec" &&
+            ["TRD_APPROVED", "PLAN_DRAFT", "PLAN_APPROVED"].includes(quest.state)
           )
             controls +=
-              button(
-                "Generate spec",
-                "GENERATE_SPEC",
-                { "quest-id": id },
-                "small",
-              ) +
-              button(
-                "Write / import spec",
-                "edit-spec",
-                { "quest-id": id },
-                "small",
-              ) +
-              `<select id="quest-runtime" aria-label="Specification runtime">${runtimeOptions()}</select>`;
+              button("Generate spec", "GENERATE_SPEC", { "quest-id": id }, "small") +
+              button("Write / import spec", "edit-spec", { "quest-id": id }, "small") +
+              (quest.workflowVersion === 2
+                ? ""
+                : `<select id="quest-runtime" aria-label="Specification runtime">${runtimeOptions()}</select>`);
           return architectDocument(
             `${id}-${kind}`,
             `${esc(title)}${doc ? `<span class="muted"> · revision ${doc.revision}</span>` : ""}`,
@@ -717,16 +830,27 @@ function questView(id, tab = "overview") {
           "Jira task appendix",
           appendix.error
             ? `<pre class="document">${esc(appendix.error)}</pre>`
-            : documentPreview(
-                `${id}-appendix`,
-                "Jira appendix",
-                appendix.content,
-              ),
+            : documentPreview(`${id}-appendix`, "Jira appendix", appendix.content),
           !appendix.error
             ? documentViewSelect(`${id}-appendix`, "Jira appendix") +
                 `<a class="btn small" href="/api/artifacts/${encodeURIComponent(appendix.id)}" download>Download .md</a>`
             : "",
         );
+  }
+  if (tab === "appendix") {
+    const doc = artifact(id, "appendix");
+    body = panel(
+      "Jira Appendix",
+      doc
+        ? documentViewSelect(`${id}-appendix-review`, "Jira Appendix") +
+            documentPreview(`${id}-appendix-review`, "Jira Appendix", doc.content) +
+            `<a class="btn small" href="/api/artifacts/${encodeURIComponent(doc.id)}" download>Download .md</a>`
+        : empty(
+            icon("jira"),
+            "No appendix saved",
+            "Generate the appendix from the approved plan first.",
+          ),
+    );
   }
   if (tab === "artifacts")
     body = state.artifacts
@@ -734,25 +858,52 @@ function questView(id, tab = "overview") {
       .map((a) =>
         panel(
           `${esc(a.kind)} <span class="muted">· revision ${a.revision}</span>`,
-          `<pre class="document">${esc(a.error || a.content)}</pre>`,
-          ["trd", "plan"].includes(a.kind)
-            ? button("Edit", `edit-${a.kind}`, { "quest-id": id }, "small")
-            : "",
+          a.kind === "appendix" && !a.error
+            ? documentViewSelect(`${id}-appendix-artifact`, "Jira appendix") +
+                documentPreview(`${id}-appendix-artifact`, "Jira appendix", a.content)
+            : `<pre class="document">${esc(a.error || a.content)}</pre>`,
+          a.kind === "appendix" && !a.error
+            ? `<a class="btn small" href="/api/artifacts/${encodeURIComponent(a.id)}" download>Download .md</a>` +
+                (a.approved ? badge("APPROVED") : appendixApprovalButton(a, "small"))
+            : ["trd", "plan"].includes(a.kind)
+              ? button("Edit", `edit-${a.kind}`, { "quest-id": id }, "small")
+              : "",
         ),
       )
       .join('<div class="section-space"></div>');
   if (tab === "activity")
-    body = panel(
-      "Decisions & milestones",
-      activity(state.events.filter((e) => e.questId === id)),
-    );
-  return `<section class="page-head quest-hero"><div class="hero-copy"><div class="row-meta">${badge(`${quest.kind} QUEST`)}<span class="number">${quest.id.slice(0, 8).toUpperCase()}</span></div><h1>${esc(quest.title)}</h1><div class="quest-facts"><div><small>Status</small>${badge(quest.state)}</div><div><small>Sprint</small><strong>${esc(quest.sprint || "Unassigned")}</strong></div><div><small>Repositories</small><strong>${quest.repositoryIds.length} connected</strong></div><div><small>Repository works</small><strong>${works.length} isolated</strong></div></div></div><div class="hero-aside"><a class="subtle-link" href="#quests">← All Quests</a><div class="quest-progress"><div class="row-head"><strong>Quest progress</strong><span class="number">${pct(quest)}%</span></div>${bar(pct(quest))}<small>${tasks.filter((t) => t.state === "COMPLETED").length} / ${tasks.length} tasks completed</small></div></div></section>${questChain(quest)}<nav class="tabs" aria-label="Quest sections">${tabs.map((name) => `<a href="#quest/${id}/${name}" class="${tab === name ? "active" : ""}" ${tab === name ? 'aria-current="page"' : ""}>${name[0].toUpperCase() + name.slice(1)}</a>`).join("")}</nav>${body}`;
+    body = panel("Decisions & milestones", activity(state.events.filter((e) => e.questId === id)));
+  if (tab === "activity" && quest.workflowVersion === 2)
+    body += `<details class="panel section-space"><summary class="panel-head">Routing history</summary><pre class="document" tabindex="0">${esc(
+      JSON.stringify(
+        (state.routingDecisions || []).filter((decision) => decision.questId === id),
+        null,
+        2,
+      ),
+    )}</pre></details>`;
+
+  const verification = (state.operations || []).find((op) => op.id === `jira-verify:${id}`);
+  if (verification)
+    body =
+      panel(
+        "Jira project verification",
+        verification.error
+          ? `<div class="warning">${esc(verification.error)}</div>`
+          : verification.capabilities &&
+              (verification.capabilities.appendixHash !== artifact(id, "appendix")?.hash ||
+                verification.capabilities.contextKey !== JSON.stringify(quest.jiraContext))
+            ? `<p>Jira settings or appendix changed. Verify again before publishing.</p>`
+            : verification.capabilities
+              ? `<p>${esc(verification.capabilities.project)} verified using live read-only metadata. No issues created.</p><p>${esc(verification.capabilities.siteUrl)} · Task · ${esc(verification.capabilities.appendixField)}</p>`
+              : `<p>Verifying Jira project… No publication authorized.</p>`,
+      ) + body;
+  return `<section class="page-head quest-hero"><div class="hero-copy"><div class="row-meta">${badge(`${quest.kind} QUEST`)}<span class="number">${quest.id.slice(0, 8).toUpperCase()}</span></div><h1>${esc(quest.title)}</h1><div class="quest-facts"><div><small>Status</small>${badge(quest.state)}</div><div><small>Sprint</small><strong>${esc(quest.sprint || "Unassigned")}</strong></div><div><small>Repositories</small><strong>${quest.repositoryIds.length} connected</strong></div><div><small>Repository works</small><strong>${works.length} isolated</strong></div></div></div><div class="hero-aside"><a class="subtle-link" href="#quests">← All Quests</a><div class="quest-progress"><div class="row-head"><strong>Quest progress</strong><span class="number">${pct(quest)}%</span></div>${bar(pct(quest))}<small>${tasks.filter((t) => t.state === "COMPLETED").length} / ${tasks.length} tasks completed</small></div></div></section>${questChain(quest)}<nav class="tabs" aria-label="Quest sections">${tabs.map((name) => `<a href="#quest/${id}/${name}" class="${tab === name ? "active" : ""}" ${tab === name ? 'aria-current="page"' : ""}>${name[0].toUpperCase() + name.slice(1)}</a>`).join("")}</nav>${quest.state === "PLAN_APPROVED" ? panel("Jira", jiraSummary(quest)) : ""}${appendixStatus(quest)}${body}`;
 }
 function render() {
   if (!state) return;
-  const [route = "home", id, tab] = (location.hash.slice(1) || "home").split(
-    "/",
-  );
+  const [route = "home", id, tab] = (location.hash.slice(1) || "home").split("/");
+  if (workspaceJiraDirty && route === "settings") return;
+  if (route !== "settings") workspaceJiraDirty = false;
   document.querySelectorAll("[data-nav]").forEach((el) => {
     const selected = el.dataset.nav === (route === "quest" ? "quests" : route);
     el.classList.toggle("active", selected);
@@ -762,23 +913,17 @@ function render() {
   $("#breadcrumb").textContent = labels[route] || "Overview";
   $("#quest-count").textContent = state.quests.length;
   const sprint = state.quests.find((q) => q.sprint)?.sprint;
-  const sprintQuests = state.quests.filter(
-    (q) => sprint && q.sprint === sprint,
-  );
-  const completed = sprintQuests.filter(
-    (q) => q.state === "PRS_CREATED",
-  ).length;
+  const sprintQuests = state.quests.filter((q) => sprint && q.sprint === sprint);
+  const completed = sprintQuests.filter((q) => q.state === "PRS_CREATED").length;
   $("#sidebar-sprint").innerHTML =
     `<div class="eyebrow">${icon("sword")} CURRENT SPRINT</div><strong>${esc(sprint || "No sprint assigned")}</strong>${bar(sprintQuests.length ? Math.round((completed / sprintQuests.length) * 100) : 0)}<small>${completed} / ${sprintQuests.length} Quests complete</small>`;
   // Preserve unsent agent instructions across live state updates.
-  const selections = [...document.querySelectorAll("#main select")].map(
-    (el) => ({
-      id: el.id,
-      task: el.dataset.taskRuntime,
-      work: el.dataset.workRuntime,
-      value: el.value,
-    }),
-  );
+  const selections = [...document.querySelectorAll("#main select")].map((el) => ({
+    id: el.id,
+    task: el.dataset.taskRuntime,
+    work: el.dataset.workRuntime,
+    value: el.value,
+  }));
   const drafts = new Map(
     [...document.querySelectorAll('form[data-form="message"]')].map((form) => [
       form.dataset.run,
@@ -830,8 +975,15 @@ function render() {
 }
 function dialog(title, fields, form, submit = "Save") {
   $("#dialog-content").innerHTML =
-    `<form data-form="${form}"><div class="dialog-head"><h2>${title}</h2><button class="btn ghost" type="button" data-action="close-dialog" aria-label="Close dialog">×</button></div><div class="dialog-body">${fields}<div class="form-error" role="alert"></div></div><div class="dialog-foot"><button class="btn" type="button" data-action="close-dialog">Cancel</button><button class="btn primary" type="submit">${submit}</button></div></form>`;
+    `<form data-form="${form}"><div class="dialog-head"><h2>${title}</h2><button class="btn ghost" type="button" data-action="close-dialog" aria-label="Close dialog">×</button></div><div class="dialog-body">${fields}<div class="form-error" role="alert"></div></div><div class="dialog-foot"><button class="btn" type="button" data-action="close-dialog">Cancel</button><button class="btn primary" type="submit"${["repository", "repository-path"].includes(form) ? " disabled" : ""}>${submit}</button></div></form>`;
   $("#dialog").showModal();
+}
+function executionFields() {
+  const options = (state.modelRegistry || [])
+    .filter((m) => m.available && m.verified)
+    .map((m) => `<option value="${esc(m.id)}">${esc(m.runtime)} · ${esc(m.id)}</option>`)
+    .join("");
+  return `<details><summary>Agent execution and model routing</summary><div class="panel-body"><div class="form-row"><label>Quest runtime<select name="executionRuntime"><option value="claude">Claude Code</option><option value="codex">Codex</option></select></label><label>Mode<select name="executionMode"><option value="guided">Guided — manual approvals</option><option value="autonomous">Autonomous after plan approval and Jira linking</option></select></label></div><label>Routing<select name="routingMode"><option value="dynamic">Dynamic — Opus orchestrator</option><option value="manual">Manual — configured model</option></select></label><label>Quest model override<select name="executionModel"><option value="">Use role / workspace policy</option>${options}</select></label><label>Effort<select name="executionEffort"><option>high</option><option>medium</option><option>low</option></select></label>${["architect", "planner", "developer", "reviewer"].map((role) => `<div class="form-row"><label>${role} runtime<select name="${role}Runtime"><option value="inherit">Inherit Quest / developer</option><option value="claude">Claude Code</option><option value="codex">Codex</option></select></label><label>${role} model<select name="${role}Model"><option value="">Inherit policy</option>${options}</select></label></div>`).join("")}<details><summary>Orchestrator and budgets</summary><div class="panel-body"><label>Orchestrator runtime<select name="orchestratorRuntime"><option value="claude">Claude Code</option><option value="codex">Codex</option></select></label><label>Requested orchestrator model<input name="orchestratorModel" value="claude-opus-5-5"></label><label>Orchestrator effort<select name="orchestratorEffort"><option>high</option></select></label><label>Parallel developers<input name="developerLimit" type="number" min="1" max="${esc(state.settings.maxDeveloperAgents || 5)}" value="${esc(state.settings.maxDeveloperAgents || 5)}"></label><label>Task runtime (minutes)<input name="taskMinutes" type="number" min="1" max="240" value="60"></label><label>Human PR reviewers<input name="humanReviewers" placeholder="backend-lead, payment-owner"></label><label class="checks"><input type="checkbox" name="allowAutoPr">Permit PR creation after validated independent review in Autonomous mode</label><small>Never merges, deploys or releases. Jira publication remains explicit. Model availability requires the administrator registry; no Fable or implicit fallback. Unknown token/cost data stays unavailable.</small></div></details></div></details>`;
 }
 function newQuest() {
   if (!state.repositories.length) {
@@ -840,18 +992,59 @@ function newQuest() {
   }
   dialog(
     "Create a Quest",
-    `<div class="form-row"><label>Quest type<select name="kind"><option value="PRODUCT">⚑ Product Quest</option><option value="TECH">⌘ Tech Quest</option></select></label><label>Sprint (optional)<input name="sprint" maxlength="80" placeholder="Sprint 42"></label></div><label>Title<input name="title" required maxlength="160" placeholder="What are we building?"></label><label>Source<select name="sourceType"><option value="text">Local text / technical idea</option><option value="file">Local file (.md, .txt, .pdf, .docx)</option><option value="confluence">Confluence page</option></select></label><label data-source="text">Requirements or technical idea<textarea name="content" rows="6" placeholder="Describe the problem, desired outcome and constraints…"></textarea></label><label data-source="file" hidden>Choose a file<input name="file" type="file" accept=".md,.txt,.pdf,.docx"><small>Maximum 8 MB. Text PDFs only.</small></label><label data-source="confluence" hidden>Confluence page URL<input name="url" type="url" placeholder="https://company.atlassian.net/wiki/spaces/…"><small>Main page plus direct linked Confluence pages only.</small></label><label>Affected repositories <small>Selected repositories bound the architect's impact analysis.</small></label><div class="checks">${state.repositories.map((repo) => `<label><input type="checkbox" name="repositoryIds" value="${repo.id}" checked>${esc(repo.name)}</label>`).join("")}</div>`,
+    `<div class="form-row"><label>Quest type<select name="kind"><option value="PRODUCT">⚑ Product Quest</option><option value="TECH">⌘ Tech Quest</option></select></label><label>Sprint (optional)<input name="sprint" maxlength="80" placeholder="Sprint 42"></label></div><label>Title<input name="title" required maxlength="160" placeholder="What are we building?"></label><label>Source<select name="sourceType"><option value="text">Local text / technical idea</option><option value="file">Local file (.md, .txt, .pdf, .docx)</option><option value="confluence">Confluence page</option></select></label><label data-source="text">Requirements or technical idea<textarea name="content" rows="6" placeholder="Describe the problem, desired outcome and constraints…"></textarea></label><label data-source="file" hidden>Choose a file<input name="file" type="file" accept=".md,.txt,.pdf,.docx"><small>Maximum 8 MB. Text PDFs only.</small></label><label data-source="confluence" hidden>Confluence page URL<input name="url" type="url" placeholder="https://company.atlassian.net/wiki/spaces/…"><small>Main page plus direct linked Confluence pages only.</small></label><label>Affected repositories <small>Selected repositories bound the architect's impact analysis.</small></label><div class="checks">${state.repositories.map((repo) => `<label><input type="checkbox" name="repositoryIds" value="${repo.id}" checked>${esc(repo.name)}</label>`).join("")}</div>${questJiraFields()}<label class="checks"><input type="checkbox" name="agentProfilesEnabled">Enable versioned Agent Profiles (v1.2.1; existing routing and permissions)</label>${executionFields()}`,
     "new-quest",
     "Create Quest",
   );
+  if (!questJiraDefault())
+    document
+      .querySelectorAll(
+        "#dialog-content [data-jira-config] input, #dialog-content [data-jira-config] select, #dialog-content [data-jira-config] textarea",
+      )
+      .forEach((el) => (el.disabled = true));
+}
+function repositoryPathFields(value = "") {
+  return `<label for="repository-folder-path">Local Git repository path</label><div class="repository-path-input"><input id="repository-folder-path" name="path" required value="${esc(value)}" placeholder="/Users/you/Workspace/repository"><button class="btn" type="button" data-action="browse-repository">${icon("folder")} Browse</button></div><div class="toolbar"><button class="btn small" type="button" data-action="inspect-repository">Check path</button><small>Browse or enter a path, then check it before saving.</small></div><div class="repository-preview" aria-live="polite" role="status">No folder checked.</div>`;
 }
 function addRepository() {
-  dialog(
-    "Register repository",
-    '<label>Local Git repository path<input name="path" required placeholder="E:\\Workspace\\payment-service"><small>Select the repository root. A development branch must exist before execution.</small></label>',
-    "repository",
-    "Register repository",
-  );
+  dialog("Register repository", repositoryPathFields(), "repository", "Register repository");
+}
+async function checkRepositoryFolder(form, browse) {
+  const input = form.elements.path;
+  const preview = form.querySelector(".repository-preview");
+  const submit = form.querySelector('[type="submit"]');
+  const version = Number(form.dataset.folderCheck || 0) + 1;
+  form.dataset.folderCheck = String(version);
+  submit.disabled = true;
+  preview.textContent = browse
+    ? "Choose a folder in the macOS dialog…"
+    : "Checking Git repository…";
+  try {
+    const result = await action(browse ? "PICK_REPOSITORY_FOLDER" : "INSPECT_REPOSITORY_FOLDER", {
+      ...(!browse ? { path: input.value } : {}),
+      ...(form.elements.repositoryId?.value
+        ? { repositoryId: form.elements.repositoryId.value }
+        : {}),
+    });
+    if (form.isConnected === false || form.dataset.folderCheck !== String(version)) return;
+    if (result.cancelled || result.unavailable) {
+      preview.textContent = result.cancelled
+        ? "Selection cancelled. The path is unchanged."
+        : result.message;
+      return;
+    }
+    input.value = result.path;
+    form.dataset.validatedPath = result.valid ? result.path : "";
+    preview.innerHTML = `${badge(result.valid ? "VALID" : "BLOCKED")} ${result.name ? `<strong>${esc(result.name)}</strong><small>Git root: ${esc(result.gitRoot)}<br>Current branch: ${esc(result.currentBranch || "Detached HEAD")} · Default branch: ${esc(result.defaultBranch || "Not reliably detected")}${result.referencedQuests ? `<br>Referenced by ${esc(result.referencedQuests)} Quest(s)` : ""}</small>` : ""}${result.error ? `<p class="form-error">${esc(result.error)}</p>` : ""}`;
+  } catch (error) {
+    if (form.dataset.folderCheck === String(version)) {
+      form.dataset.validatedPath = "";
+      preview.textContent = `${error.message}. You can enter the path manually and check it.`;
+    }
+  } finally {
+    if (form.dataset.folderCheck === String(version))
+      submit.disabled = !input.value || form.dataset.validatedPath !== input.value;
+  }
 }
 function editArtifact(kind, questId) {
   const current = artifact(questId, kind);
@@ -859,9 +1052,7 @@ function editArtifact(kind, questId) {
     id: t.key,
     title: t.title,
     repoId: t.repoId,
-    dependencies: t.dependencies.map(
-      (key) => state.tasks.find((task) => task.id === key)?.key,
-    ),
+    dependencies: t.dependencies.map((key) => state.tasks.find((task) => task.id === key)?.key),
     validation: t.validationProfile,
   }));
   const template = [
@@ -875,19 +1066,71 @@ function editArtifact(kind, questId) {
   ];
   dialog(
     `Edit ${kind === "trd" ? "TRD" : kind === "spec" ? "specification" : "implementation plan"}`,
-    `<input type="hidden" name="questId" value="${esc(questId)}">${kind === "spec" ? `<input type="hidden" name="trdArtifactId" value="${esc(artifact(questId, "trd")?.id)}">` : ""}<label>Markdown document<textarea name="content" rows="14" required>${esc((current?.content || "").split("<!-- devquest-tasks")[0])}</textarea><small>Saving a revision requires reviewing the document and downstream plan again.</small></label>${kind === "plan" ? `<label>Tasks (JSON)<textarea name="tasks" rows="10" required>${esc(JSON.stringify(tasks.length ? tasks : template, null, 2))}</textarea><small>Use repository IDs below. Profiles: node-test, npm-test, go-test, pytest. Dependencies reference task IDs.</small></label><div class="code">${state.repositories.map((r) => `${esc(r.name)}: ${r.id}`).join("\n")}</div>` : ""}`,
+    `<input type="hidden" name="questId" value="${esc(questId)}">${kind === "spec" && current?.sourceStage !== "brainstorm" ? `<input type="hidden" name="trdArtifactId" value="${esc(artifact(questId, "trd")?.id)}">` : ""}<label>Markdown document<textarea name="content" rows="14" required>${esc((current?.content || "").split("<!-- devquest-tasks")[0])}</textarea><small>${current?.sourceStage === "brainstorm" ? "This is the canonical brainstorming specification. Edit it before starting Analyze." : "Saving a revision requires reviewing the document and downstream plan again."}</small></label>${kind === "plan" ? `<label>Tasks (JSON)<textarea name="tasks" rows="10" required>${esc(JSON.stringify(tasks.length ? tasks : template, null, 2))}</textarea><small>Use repository IDs below. Profiles: node-test, npm-test, go-test, pytest. Dependencies reference task IDs.</small></label><div class="code">${state.repositories.map((r) => `${esc(r.name)}: ${r.id}`).join("\n")}</div>` : ""}`,
     `edit-${kind}`,
     "Save draft",
   );
 }
+document.addEventListener("input", (event) => {
+  if (event.target.closest("form")?.dataset?.form === "workspace-jira") workspaceJiraDirty = true;
+  if (event.target.name !== "path") return;
+  const form = event.target.closest("form");
+  if (!["repository", "repository-path"].includes(form?.dataset.form)) return;
+  form.dataset.folderCheck = String(Number(form.dataset.folderCheck || 0) + 1);
+  form.dataset.validatedPath = "";
+  form.querySelector('[type="submit"]').disabled = true;
+  form.querySelector(".repository-preview").textContent = "Path changed. Check it before saving.";
+});
 document.addEventListener("change", (event) => {
+  if (event.target.closest("form")?.dataset?.form === "workspace-jira") workspaceJiraDirty = true;
   if (event.target.dataset.documentView) {
     const mode = event.target.value;
     if (!["viewer", "source"].includes(mode)) return;
     documentModes.set(event.target.dataset.documentView, mode);
-    event.target
-      .closest(".architect-document")
-      .querySelector(".document-views").dataset.view = mode;
+    event.target.closest(".architect-document").querySelector(".document-views").dataset.view =
+      mode;
+  }
+  if (event.target.name === "jiraEnabled") {
+    const section = event.target.closest("form").querySelector("[data-jira-config]");
+    section.hidden = !event.target.checked;
+    section
+      .querySelectorAll("input, select, textarea")
+      .forEach((el) => (el.disabled = !event.target.checked));
+  }
+  if (event.target.name === "project") {
+    const form = event.target.closest("form"),
+      project = event.target.value.trim(),
+      previous = form.elements.epic?.value || "";
+    const p = workspaceJira().projects[project] || { project };
+    if (form.dataset.form === "new-quest") form.dataset.jiraProjectOverride = "true";
+    if (form.elements.makeDefault)
+      form.elements.makeDefault.checked = workspaceJira().defaultProject === project;
+    form.querySelector("[data-jira-fields]").outerHTML = jiraFields(
+      { ...p, epic: previous.startsWith(project + "-") ? previous : "" },
+      form.dataset.form === "workspace-jira",
+    );
+    if (form.dataset.form === "workspace-jira")
+      form
+        .querySelectorAll('[name="jiraRepositoryIds"]')
+        .forEach((el) => (el.checked = Boolean(p.repositoryIds?.includes(el.value))));
+  }
+  if (event.target.name === "repositoryIds") {
+    const form = event.target.closest("form");
+    if (form?.dataset.form === "new-quest" && !form.dataset.jiraProjectOverride) {
+      const ids = [...form.querySelectorAll('[name="repositoryIds"]:checked')].map(
+        (el) => el.value,
+      );
+      const project = questJiraDefault(ids),
+        p = workspaceJira().projects[project] || {};
+      form.querySelector("[data-jira-fields]").outerHTML = jiraFields(p);
+      if (!form.elements.jiraEnabled.checked)
+        form
+          .querySelector("[data-jira-fields]")
+          .querySelectorAll("input, select, textarea")
+          .forEach((el) => (el.disabled = true));
+      if (!project && form.elements.jiraEnabled.checked)
+        toast("Selected repositories have different Jira projects. Choose a project explicitly.");
+    }
   }
   if (event.target.name === "sourceType")
     document
@@ -904,12 +1147,54 @@ document.addEventListener("click", async (event) => {
   if (!target) return;
   const type = target.dataset.action;
   if (type === "new-quest") return newQuest();
+  if (type === "SET_AGENT_PROFILES") {
+    target.disabled = true;
+    try {
+      await action(type, {
+        questId: target.dataset.questId,
+        enabled: target.dataset.enabled === "true",
+      });
+      toast("Agent Profile settings updated for future runs.");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      target.disabled = false;
+    }
+    return;
+  }
   if (type === "add-repository") return addRepository();
+  if (["browse-repository", "inspect-repository"].includes(type)) {
+    target.disabled = true;
+    try {
+      await checkRepositoryFolder(target.closest("form"), type === "browse-repository");
+    } finally {
+      target.disabled = false;
+    }
+    return;
+  }
+  if (type === "repository-config") {
+    const repo = repository(target.dataset.repositoryId);
+    return dialog(
+      "Repository branch policy",
+      `<input type="hidden" name="repositoryId" value="${esc(repo.id)}">${["defaultBranch", "baseBranch", "prTarget"].map((name) => `<label>${name}<input name="${name}" required value="${esc(repo[name] || "")}"></label>`).join("")}<label>Protected branch patterns<input name="protectedBranches" value="${esc((repo.protectedBranches || ["main", "master"]).join(", "))}"></label><label>Default human reviewers<input name="reviewers" value="${esc((repo.reviewers || []).join(", "))}"></label><small>Configure before creating workspaces. Existing workspaces retain their reviewed target.</small>`,
+      "repository-config",
+      "Save policy",
+    );
+  }
+  if (type === "pr-target") {
+    const work = state.works.find((w) => w.id === target.dataset.workId);
+    return dialog(
+      "Change PR target",
+      `<input type="hidden" name="questId" value="${esc(work.questId)}"><input type="hidden" name="workId" value="${esc(work.id)}"><label>Target branch<input name="target" required value="${esc(work.prTarget)}"></label><small>Changing the target invalidates repository validation and production review.</small>`,
+      "pr-target",
+      "Validate target",
+    );
+  }
   if (type === "repository-path") {
     const repo = repository(target.dataset.repositoryId);
     return dialog(
       "Repair repository path",
-      `<input type="hidden" name="repositoryId" value="${esc(repo.id)}"><label>Current local Git repository root<input name="path" required value="${esc(repo.path)}"></label><small>The new folder must have the same Git remote. Saved Quests and compatible worktrees are preserved.</small>`,
+      `<input type="hidden" name="repositoryId" value="${esc(repo.id)}">${repositoryPathFields(repo.path)}<small>The new folder must have the same Git remote. Saved Quests and compatible worktrees are preserved.</small>`,
       "repository-path",
       "Update path",
     );
@@ -926,16 +1211,46 @@ document.addEventListener("click", async (event) => {
       "Link issue and continue",
     );
   }
+  if (type === "REFRESH_QUEST_JIRA") {
+    target.disabled = true;
+    try {
+      await action(type, { questId: target.dataset.questId });
+      editJira(state.quests.find((q) => q.id === target.dataset.questId));
+      toast("Inherited Jira defaults refreshed; explicit overrides and Epic preserved.");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      target.disabled = false;
+    }
+    return;
+  }
+  if (type === "jira-settings")
+    return editJira(state.quests.find((q) => q.id === target.dataset.questId));
   if (type === "appendix-dialog") {
-    const questId = target.dataset.questId;
-    const context =
-      state.quests.find((q) => q.id === questId).jiraContext || {};
-    return dialog(
-      "Generate Jira task appendix",
-      `<input type="hidden" name="questId" value="${esc(questId)}"><input type="hidden" name="planArtifactId" value="${esc(artifact(questId, "plan")?.id)}"><label>Jira project key<input name="project" required value="${esc(context.project || "")}"></label><label>Epic key<input name="epic" required value="${esc(context.epic || "")}"></label><label>Assignee<input name="assignee" required value="${esc(context.assignee || "")}"></label><label>Weight reference, if your board needs it<textarea name="weightReference" rows="4">${esc(context.weightReference || "")}</textarea></label><small>The local skill bridge fetches live Appendix options and generates from the approved plan.</small>`,
-      "generate-appendix",
-      "Generate appendix",
-    );
+    const quest = state.quests.find((q) => q.id === target.dataset.questId),
+      context = savedJiraContext(quest);
+    if (
+      !context.project ||
+      !context.siteUrl ||
+      !context.projectUrl ||
+      quest.jiraConfig?.explicitlyDisabled
+    )
+      return editJira(quest);
+    target.disabled = true;
+    toast("Checking Jira configuration…");
+    try {
+      await action("GENERATE_APPENDIX", {
+        questId: quest.id,
+        planArtifactId: artifact(quest.id, "plan")?.id,
+        requestId: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
+      });
+      toast("Generating Jira Appendix… Review the Markdown before publishing.");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      target.disabled = false;
+    }
+    return;
   }
   if (type === "edit-appendix") {
     const questId = target.dataset.questId;
@@ -949,6 +1264,14 @@ document.addEventListener("click", async (event) => {
   if (type === "create-pr-dialog" || type === "reviewers-dialog") {
     const work = state.works.find((w) => w.id === target.dataset.workId);
     const fields = `<input type="hidden" name="questId" value="${esc(work.questId)}"><input type="hidden" name="workId" value="${esc(work.id)}">`;
+    if (type === "create-pr-dialog" && work.workflowVersion === 2)
+      return dialog(
+        "Create reviewed pull request",
+        fields +
+          `<p>Source: ${esc(work.branch)} → ${esc(work.prTarget)}</p><label>Human reviewers<input name="reviewers" value="${esc((work.reviewers || state.quests.find((q) => q.id === work.questId)?.reviewers || repository(work.repoId)?.reviewers || state.settings.reviewers || []).join(", "))}"></label><small>Requires integrated tasks, clean exact-commit review and validation. Human merge remains required.</small>`,
+        "v11-pr",
+        "Create PR",
+      );
     if (type === "create-pr-dialog")
       return dialog(
         "Commit, push and create PR",
@@ -972,10 +1295,30 @@ document.addEventListener("click", async (event) => {
       "Save checkpoint",
     );
   }
+  if (type === "PUBLISH_JIRA") {
+    target.disabled = true;
+    try {
+      const preview = await action("PREVIEW_JIRA_PUBLICATION", {
+        questId: target.dataset.questId,
+        appendixArtifactId: artifact(target.dataset.questId, "appendix")?.id,
+      });
+      dialog(
+        "Confirm Jira publication",
+        `<input type="hidden" name="questId" value="${esc(preview.questId)}"><input type="hidden" name="appendixArtifactId" value="${esc(preview.artifactId || "")}"><input type="hidden" name="appendixHash" value="${esc(preview.hash || "")}"><p>This will publish up to <strong>${preview.maxIssues} real Jira issue${preview.maxIssues === 1 ? "" : "s"}</strong> to <strong>${esc(preview.project)}</strong>${preview.epic ? ` under Epic ${esc(preview.epic)}` : ""}.</p><p>Approved appendix revision ${preview.revision}. “Sample” is the first real issue, not sample data. No issues are created until you confirm.</p><small>Artifact: ${esc(preview.artifactId)} · SHA-256: ${esc(preview.hash)}</small>`,
+        "publish-jira",
+        "Confirm publication",
+      );
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      target.disabled = false;
+    }
+    return;
+  }
   target.disabled = true;
   try {
     const data = {};
-    for (const key of ["questId", "taskId", "workId", "runId"])
+    for (const key of ["questId", "taskId", "workId", "runId", "artifactId"])
       if (target.dataset[key]) data[key] = target.dataset[key];
     data.runtime =
       (data.taskId
@@ -984,25 +1327,23 @@ document.addEventListener("click", async (event) => {
           ? document.querySelector(`[data-work-runtime="${data.workId}"]`)
           : $("#quest-runtime")
       )?.value ||
-      Object.entries(state.runtimes).find(
-        ([, runtime]) => runtime.available,
-      )?.[0] ||
+      Object.entries(state.runtimes).find(([, runtime]) => runtime.available)?.[0] ||
       "codex";
     data.acceptWarnings = $("#accept-warnings")?.checked || false;
-    if (type === "PUBLISH_JIRA")
-      data.appendixArtifactId = artifact(data.questId, "appendix")?.id;
-    if (type === "APPROVE_TRD" || type === "APPROVE_PLAN")
-      data.artifactId = artifact(
+    if (["APPROVE_TRD", "APPROVE_PLAN", "APPROVE_APPENDIX"].includes(type))
+      data.artifactId ||= artifact(
         data.questId,
-        type === "APPROVE_TRD" ? "trd" : "plan",
+        type === "APPROVE_TRD" ? "trd" : type === "APPROVE_PLAN" ? "plan" : "appendix",
       )?.id;
     await action(type, data);
     toast(
-      type === "EXECUTE_QUEST"
-        ? "Eligible tasks scheduled."
-        : type === "CREATE_PR"
-          ? "Pull request created."
-          : "Action saved.",
+      type === "VERIFY_JIRA_PROJECT"
+        ? "Verifying Jira project… No issues will be created."
+        : type === "EXECUTE_QUEST"
+          ? "Eligible tasks scheduled."
+          : type === "CREATE_PR"
+            ? "Pull request created."
+            : "Action saved.",
     );
   } catch (error) {
     toast(error.message);
@@ -1021,6 +1362,42 @@ document.addEventListener("submit", async (event) => {
   errorBox.textContent = "";
   try {
     let result;
+    if (form.dataset.form === "publish-jira")
+      await action("PUBLISH_JIRA", {
+        questId: values.get("questId"),
+        appendixArtifactId: values.get("appendixArtifactId"),
+        appendixHash: values.get("appendixHash"),
+      });
+    if (form.dataset.form === "repository-config")
+      await action("CONFIGURE_REPOSITORY", {
+        repositoryId: values.get("repositoryId"),
+        defaultBranch: values.get("defaultBranch"),
+        baseBranch: values.get("baseBranch"),
+        prTarget: values.get("prTarget"),
+        protectedBranches: String(values.get("protectedBranches") || "")
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean),
+        reviewers: String(values.get("reviewers") || "")
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean),
+      });
+    if (form.dataset.form === "pr-target")
+      await action("SET_PR_TARGET", {
+        questId: values.get("questId"),
+        workId: values.get("workId"),
+        target: values.get("target"),
+      });
+    if (form.dataset.form === "v11-pr")
+      await action("CREATE_PR", {
+        questId: values.get("questId"),
+        workId: values.get("workId"),
+        reviewers: String(values.get("reviewers") || "")
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean),
+      });
     if (form.dataset.form === "repository-path")
       result = await action("UPDATE_REPOSITORY", {
         repositoryId: values.get("repositoryId"),
@@ -1032,6 +1409,63 @@ document.addEventListener("submit", async (event) => {
       });
     if (form.dataset.form === "new-quest") {
       const data = {
+        workflowVersion: 2,
+        agentProfiles: { enabled: Boolean(values.get("agentProfilesEnabled")) },
+        jira: values.get("jiraEnabled")
+          ? (() => {
+              const input = jiraInput(values),
+                base = workspaceJira().projects[input.project] || {};
+              return {
+                enabled: true,
+                ...Object.fromEntries(
+                  Object.entries(input).filter(
+                    ([k, v]) =>
+                      k === "epic" ||
+                      (k === "project"
+                        ? v !== questJiraDefault(values.getAll("repositoryIds"))
+                        : JSON.stringify(v) !==
+                          JSON.stringify(Object.hasOwn(base, k) ? base[k] : "")),
+                  ),
+                ),
+              };
+            })()
+          : { enabled: false },
+        epic: values.get("epic") || "",
+        reviewers: String(values.get("humanReviewers") || "")
+          .split(",")
+          .map((v) => v.trim())
+          .filter(Boolean),
+        execution: {
+          runtime: values.get("executionRuntime") || "claude",
+          mode: values.get("executionMode") || "guided",
+          roles: Object.fromEntries(
+            ["architect", "planner", "developer", "reviewer"].map((role) => [
+              role,
+              {
+                runtime: values.get(`${role}Runtime`) || "inherit",
+                ...(values.get(`${role}Model`) ? { model: values.get(`${role}Model`) } : {}),
+              },
+            ]),
+          ),
+          routing: {
+            mode: values.get("routingMode") || "dynamic",
+            ...(values.get("executionModel") ? { model: values.get("executionModel") } : {}),
+            effort: values.get("executionEffort") || "high",
+            orchestrator: {
+              runtime: values.get("orchestratorRuntime") || "claude",
+              model: values.get("orchestratorModel") || "claude-opus-5-5",
+              effort: values.get("orchestratorEffort") || "high",
+            },
+          },
+          limits: {
+            developers: Number(values.get("developerLimit") || 5),
+            taskMinutes: Number(values.get("taskMinutes") || 60),
+          },
+          permissions: {
+            createPr: Boolean(values.get("allowAutoPr")),
+            publishJira: false,
+          },
+        },
         kind: values.get("kind"),
         title: values.get("title"),
         sprint: values.get("sprint"),
@@ -1062,11 +1496,26 @@ document.addEventListener("submit", async (event) => {
         key: values.get("key"),
         url: values.get("url"),
       });
+    if (form.dataset.form === "workspace-jira") {
+      await action("SAVE_WORKSPACE_JIRA", {
+        ...jiraInput(values),
+        expectedVersion: Number(values.get("expectedVersion")),
+        makeDefault: Boolean(values.get("makeDefault")),
+        repositoryIds: values.getAll("jiraRepositoryIds"),
+      });
+      workspaceJiraDirty = false;
+      render();
+    }
+    if (form.dataset.form === "jira-settings")
+      await action("SAVE_JIRA_CONTEXT", { questId: values.get("questId"), ...jiraInput(values) });
     if (form.dataset.form === "generate-appendix")
-      await action("GENERATE_APPENDIX", {
+      result = await action("GENERATE_APPENDIX", {
         questId: values.get("questId"),
         planArtifactId: values.get("planArtifactId"),
+        requestId: values.get("requestId"),
         project: values.get("project"),
+        siteUrl: values.get("siteUrl"),
+        projectUrl: values.get("projectUrl"),
         epic: values.get("epic"),
         assignee: values.get("assignee"),
         weightReference: values.get("weightReference"),
@@ -1122,7 +1571,15 @@ document.addEventListener("submit", async (event) => {
       });
       form.reset();
     } else $("#dialog").close();
-    toast("Saved.");
+    toast(
+      form.dataset.form === "generate-appendix"
+        ? result?.state === "COMPLETED"
+          ? "Jira Appendix generated successfully. Review generated tasks before publishing."
+          : "Generating Jira Appendix…"
+        : form.dataset.form === "jira-settings"
+          ? "Jira settings saved. Review and approve the appendix again."
+          : "Saved.",
+    );
   } catch (error) {
     errorBox.textContent = error.message;
   } finally {
@@ -1146,9 +1603,7 @@ try {
   events.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.type === "output") {
-      const output = ((liveOutput.get(data.runId) || "") + data.text).slice(
-        -16000,
-      );
+      const output = ((liveOutput.get(data.runId) || "") + data.text).slice(-16000);
       liveOutput.set(data.runId, output);
       const el = document.querySelector(`[data-output="${data.runId}"]`);
       if (el) el.textContent = responseText(output);
@@ -1157,8 +1612,15 @@ try {
       refresh.timer = setTimeout(refresh, 100);
     }
   };
-  events.onerror = () =>
-    toast("Connection interrupted. Reconnecting to your local server…");
+  events.onerror = () => toast("Connection interrupted. Reconnecting to your local server…");
 } catch (error) {
   $("#main").textContent = `Unable to connect: ${error.message}`;
 }
+
+setTimeout(function updateAgentElapsed() {
+  document.querySelectorAll("[data-agent-elapsed]").forEach((el) => {
+    const end = el.dataset.end ? Date.parse(el.dataset.end) : Date.now();
+    el.textContent = `${Math.max(0, Math.floor((end - Date.parse(el.dataset.start)) / 1000))}s`;
+  });
+  setTimeout(updateAgentElapsed, 1000);
+}, 1000);

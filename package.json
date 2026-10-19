@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
-    "check": "node --check src/server.js && node --check src/engine.js && node --check src/adapters.js && node --check src/store.js && node --check public/app.js"
+    "check": "node --check src/agent-profiles.js && node --check src/agent-context.js && node --check src/server.js && node --check src/engine.js && node --check src/adapters.js && node --check src/store.js && node --check src/routing.js && node --check src/repositories.js && node --check src/orchestration.js && node --check src/agent-results.js && node --check src/production-review.js && node --check src/folder-picker.js && node --check src/jira-publication.js && node --check src/jira-settings.js && node --check src/jira-mcp.js && node --check src/appendix-markdown.js && node --check src/jira-appendix-agent.js && node --check src/design-stages.js && node --check src/repository-reader.js && node --check src/access.js && node --check src/scheduler.js && node --check public/app.js"
   },
   "dependencies": {
     "mammoth": "^1.12.2",

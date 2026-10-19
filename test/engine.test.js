@@ -1,3 +1,4 @@
+import { designResult } from "./design-fixture.js";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync } from "node:fs";
@@ -15,206 +16,18 @@ function git(cwd, ...args) {
     windowsHide: true,
   }).trim();
 }
-export async function fixture(t, { realGit = false } = {}) {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "devquest-engine-"));
-  const pending = [];
-  const runtime = {
-    detectCapabilities: async () => ({
-      available: true,
-      interactive: true,
-      nativeResume: false,
-    }),
-    start: (options) =>
-      new Promise((resolve, reject) => {
-        pending.push({ options, resolve, reject });
-        options.signal?.addEventListener(
-          "abort",
-          () => reject(new Error("Aborted")),
-          {
-            once: true,
-          },
-        );
-      }),
-  };
-  const real = await createAdapters();
-  const facts = new Map();
-  const gitAdapter = realGit
-    ? real.git
-    : {
-        register: async (p) => ({ path: p, name: path.basename(p) }),
-        prepare: async ({ path: p, branch }) => {
-          facts.set(p, {
-            head: "abc",
-            branch,
-            dirty: false,
-            diff: "",
-            fingerprint: "abc",
-            contentFingerprint: "content",
-          });
-          return { head: "abc" };
-        },
-        reconcile: async ({ path: p }) => {
-          assert.ok(facts.has(p), "missing worktree");
-        },
-        inspect: async (p) => ({ ...facts.get(p) }),
-        test: async () => ({
-          passed: true,
-          summary: "# tests 1\n# pass 1\n# fail 0",
-        }),
-        commit: async () => {},
-      };
-  const created = [];
-  const adapters = {
-    config: { jiraSkill: {} },
-    git: gitAdapter,
-    runtimes: { codex: runtime, claude: runtime },
-    skill: {
-      publish: async ({ tasks }) =>
-        tasks.map((task, i) => ({ taskId: task.id, key: `DEV-${i + 1}` })),
-    },
-    sourceControl: {
-      create: async (args) => {
-        created.push(args);
-        return {
-          number: created.length,
-          url: `https://github.com/example/repo/pull/${created.length}`,
-        };
-      },
-    },
-    confluence: {
-      fetch: async () => ({
-        content: "Requirement",
-        sources: [],
-        warnings: [],
-      }),
-    },
-  };
-  const store = new Store(path.join(dir, "data")),
-    engine = new Engine({ store, adapters });
-  await engine.initialize();
-  t.after(async () => {
-    await engine.close();
-    store.close();
-  });
-  const repos = [];
-  for (const name of ["alpha", "beta"]) {
-    const repoPath = path.join(dir, name);
-    if (realGit) {
-      mkdirSync(repoPath);
-      git(repoPath, "init", "-b", "development");
-      git(repoPath, "config", "user.name", "Test");
-      git(repoPath, "config", "user.email", "test@example.invalid");
-      writeFileSync(
-        path.join(repoPath, "smoke.test.js"),
-        "require('node:test')('working',()=>require('node:assert/strict').equal(2+2,4));\n",
-      );
-      git(repoPath, "add", ".");
-      git(repoPath, "commit", "-m", "initial");
-    }
-    repos.push(await engine.action("REGISTER_REPOSITORY", { path: repoPath }));
-  }
-  const finish = async (
-    text = "Implementation complete",
-    waitingInput = false,
-  ) => {
-    const next = pending.shift();
-    assert.ok(next, "pending runtime");
-    next.resolve({ text, summary: text.slice(0, 4000), waitingInput });
-    await Promise.all([...engine.jobs.values()].map((job) => job.done));
-  };
-  const quest = await engine.action("CREATE_QUEST", {
-    kind: "PRODUCT",
-    title: "Recurring payments",
-    content: "Implement recurring payments and notifications",
-    repositoryIds: repos.map((r) => r.id),
-  });
-  async function approve(kind) {
-    await engine.action(kind === "trd" ? "APPROVE_TRD" : "APPROVE_PLAN", {
-      questId: quest.id,
-      artifactId: store.latest(quest.id, kind).id,
-    });
-  }
-  async function plan() {
-    await engine.action("ANALYZE_PRD", { questId: quest.id });
-    await finish("Both registered repositories are affected.");
-    await engine.action("SAVE_TRD", {
-      questId: quest.id,
-      content: "Approved architecture and tests.",
-    });
-    await approve("trd");
-    await engine.action("SAVE_PLAN", {
-      questId: quest.id,
-      content: "Implement alpha then notify beta.",
-      tasks: [
-        {
-          id: "A",
-          title: "Alpha change",
-          repoId: repos[0].id,
-          dependencies: [],
-          validation: "node-test",
-        },
-        {
-          id: "B",
-          title: "Alpha followup",
-          repoId: repos[0].id,
-          dependencies: [],
-          validation: "node-test",
-        },
-        {
-          id: "C",
-          title: "Independent beta",
-          repoId: repos[1].id,
-          dependencies: [],
-          validation: "node-test",
-        },
-        {
-          id: "D",
-          title: "Dependent beta",
-          repoId: repos[1].id,
-          dependencies: ["A", "B"],
-          validation: "node-test",
-        },
-      ],
-    });
-    await approve("plan");
-  }
-  const publish = () => engine.action("PUBLISH_JIRA", { questId: quest.id });
-  return {
-    dir,
-    engine,
-    store,
-    pending,
-    finish,
-    quest,
-    repos,
-    plan,
-    publish,
-    approve,
-    adapters,
-    facts,
-    created,
-  };
-}
+import { fixture } from "./engine-fixture.js";
 
 test("human gates cannot be bypassed and approvals bind document revisions", async (t) => {
   const f = await fixture(t);
-  await assert.rejects(
-    f.engine.action("GENERATE_PLAN", { questId: f.quest.id }),
-    /trd is missing/,
-  );
-  await assert.rejects(
-    f.engine.action("EXECUTE_QUEST", { questId: f.quest.id }),
-    /Publish/,
-  );
+  await assert.rejects(f.engine.action("GENERATE_PLAN", { questId: f.quest.id }), /trd is missing/);
+  await assert.rejects(f.engine.action("EXECUTE_QUEST", { questId: f.quest.id }), /Publish/);
   await f.plan();
   await f.engine.action("SAVE_TRD", {
     questId: f.quest.id,
     content: "Changed design",
   });
-  await assert.rejects(
-    f.engine.action("PUBLISH_JIRA", { questId: f.quest.id }),
-    /Approve/,
-  );
+  await assert.rejects(f.engine.action("PUBLISH_JIRA", { questId: f.quest.id }), /Approve/);
   await assert.rejects(
     f.engine.action("APPROVE_TRD", { questId: f.quest.id, artifactId: "old" }),
     /revision changed/,
@@ -259,10 +72,7 @@ test("existing QA issue skips Jira creation and unlocks approved implementation"
   const tickets = f.store.latest(f.quest.id, "ticket");
   assert.match(f.store.content(tickets), /QA-123/);
   assert.match(
-    readFileSync(
-      path.join(f.store.dir, "quests", f.quest.id, "ticket.md"),
-      "utf8",
-    ),
+    readFileSync(path.join(f.store.dir, "quests", f.quest.id, "ticket.md"), "utf8"),
     /Existing issue/,
   );
   await assert.rejects(
@@ -303,19 +113,13 @@ test("saved and generated specs preserve Markdown revisions and require plan rev
   assert.equal(second.revision, 2);
   assert.match(f.store.content(first), /preserve data/);
   assert.match(
-    readFileSync(
-      path.join(f.store.dir, "quests", f.quest.id, "spec.md"),
-      "utf8",
-    ),
+    readFileSync(path.join(f.store.dir, "quests", f.quest.id, "spec.md"), "utf8"),
     /preserve worktrees/,
   );
   assert.match(f.engine.context(f.quest), /Revised spec/);
   await f.approve("plan");
   await f.publish();
-  await assert.rejects(
-    f.engine.action("GENERATE_SPEC", { questId: f.quest.id }),
-    /Published/,
-  );
+  await assert.rejects(f.engine.action("GENERATE_SPEC", { questId: f.quest.id }), /Published/);
 });
 
 test("failed initial worktree preparation retries the same work record", async (t) => {
@@ -327,8 +131,7 @@ test("failed initial worktree preparation retries the same work record", async (
   let attempts = 0;
   f.adapters.git.prepare = async (args) => {
     attempts++;
-    if (attempts === 1)
-      throw new Error("Base branch development is unavailable");
+    if (attempts === 1) throw new Error("Base branch development is unavailable");
     return prepare(args);
   };
   await assert.rejects(f.engine.workFor(f.quest, task), /Base branch/);
@@ -424,15 +227,10 @@ test("partial Jira publication preserves mappings and retries only unresolved ta
   let calls = 0;
   f.adapters.skill.publish = async ({ tasks }) => {
     calls++;
-    return tasks
-      .slice(0, 1)
-      .map((task) => ({ taskId: task.id, key: `DEV-${calls}` }));
+    return tasks.slice(0, 1).map((task) => ({ taskId: task.id, key: `DEV-${calls}` }));
   };
   for (let i = 0; i < 4; i++) await f.publish();
-  assert.equal(
-    f.engine.tasks(f.quest.id).filter((task) => task.jira).length,
-    4,
-  );
+  assert.equal(f.engine.tasks(f.quest.id).filter((task) => task.jira).length, 4);
   assert.equal(calls, 4);
   await f.publish();
   assert.equal(calls, 4);
@@ -486,9 +284,7 @@ test("failed tests prevent dependents and PR creation; raw test output is not re
   });
   await f.finish();
   assert.equal(f.store.get("tasks", task.id).state, "TEST_FAILED");
-  assert.ok(
-    !f.store.get("tasks", task.id).validation.summary.includes("raw secret"),
-  );
+  assert.ok(!f.store.get("tasks", task.id).validation.summary.includes("raw secret"));
   await assert.rejects(
     f.engine.action("CREATE_PR", {
       questId: f.quest.id,
@@ -568,18 +364,17 @@ test("Tech Quest follows brainstorm, brief, impact analysis and TRD gates", asyn
     content: "Two competing publisher implementations",
     repositoryIds: f.repos.map((r) => r.id),
   });
-  await assert.rejects(
-    f.engine.action("ANALYZE_PRD", { questId: q.id }),
-    /Finish brainstorming/,
-  );
+  await assert.rejects(f.engine.action("ANALYZE_PRD", { questId: q.id }), /Finish brainstorming/);
   await f.engine.action("START_BRAINSTORM", { questId: q.id });
-  await f.finish("Goal: one publisher. Constraint: retain event schema.");
+  await f.finish(
+    designResult("brainstorm", "Goal: one publisher. Constraint: retain event schema."),
+  );
   await f.engine.action("FINISH_BRAINSTORM", { questId: q.id });
-  assert.ok(f.store.latest(q.id, "technical-brief"));
+  assert.ok(f.store.latest(q.id, "spec"));
   await f.engine.action("ANALYZE_PRD", { questId: q.id });
-  await f.finish("Both repositories consume the event.");
+  await f.finish(designResult("analysis", "Both repositories consume the event."));
   await f.engine.action("GENERATE_TRD", { questId: q.id });
-  await f.finish("# TRD\nPreserve event schema and add contract tests.");
+  await f.finish(designResult("trd", "# TRD\nPreserve event schema and add contract tests."));
   assert.equal(f.store.get("quests", q.id).state, "TRD_DRAFT");
 });
 
@@ -623,11 +418,7 @@ test("Execute Quest keeps the selected runtime across every scheduling wave", as
     runtime: "claude",
   });
   for (let i = 0; i < 4; i++) await f.finish();
-  assert.equal(
-    f.engine.tasks(f.quest.id).filter((task) => task.state === "COMPLETED")
-      .length,
-    4,
-  );
+  assert.equal(f.engine.tasks(f.quest.id).filter((task) => task.state === "COMPLETED").length, 4);
   assert.ok(
     f.store
       .all("runs")
@@ -687,13 +478,8 @@ test("two real Git repositories reach reviewed PR creation without changing norm
       questId: f.quest.id,
       taskId: task.id,
     });
-    const work = f.engine
-      .works(f.quest.id)
-      .find((w) => w.repoId === task.repoId);
-    writeFileSync(
-      path.join(work.path, `${task.key}.txt`),
-      `Change ${task.key}\n`,
-    );
+    const work = f.engine.works(f.quest.id).find((w) => w.repoId === task.repoId);
+    writeFileSync(path.join(work.path, `${task.key}.txt`), `Change ${task.key}\n`);
     await f.finish();
     assert.equal(f.store.get("tasks", task.id).state, "COMPLETED");
   }
@@ -702,9 +488,7 @@ test("two real Git repositories reach reviewed PR creation without changing norm
       questId: f.quest.id,
       workId: work.id,
     });
-    await f.finish(
-      "Reviewed aggregate changes and test outcomes. No blocking findings.",
-    );
+    await f.finish("Reviewed aggregate changes and test outcomes. No blocking findings.");
     await f.engine.action("APPROVE_REVIEW", {
       questId: f.quest.id,
       workId: work.id,
@@ -778,9 +562,13 @@ test("baseline failures block agent execution without losing the task", async (t
   );
   assert.equal(f.pending.length, 0);
   assert.equal(f.store.get("tasks", task.id).state, "PUBLISHED");
+  const failed = f.engine.works(f.quest.id)[0];
+  assert.equal(failed.baselineFailure.summary, "Missing dependencies");
+  assert.equal(failed.baselineFailure.changedFiles, false);
   f.adapters.git.test = async () => ({ passed: true, summary: "# tests 1" });
   await f.engine.action("START_TASK", { questId: f.quest.id, taskId: task.id });
   assert.equal(f.pending.length, 1);
+  assert.equal(f.engine.works(f.quest.id)[0].baselineFailure, null);
 });
 
 test("appendix approval binds to the plan and publishing uses sample checkpoints", async (t) => {
@@ -802,7 +590,7 @@ test("appendix approval binds to the plan and publishing uses sample checkpoints
   await f.engine.action("SAVE_APPENDIX", {
     questId: f.quest.id,
     planArtifactId: plan.id,
-    content: "# Weighted tasks",
+    content: readFileSync(new URL("./fixtures/jira-appendix.md", import.meta.url), "utf8"),
   });
   const appendix = f.store.latest(f.quest.id, "appendix");
   await assert.rejects(f.publish(), /current appendix/);
@@ -814,6 +602,7 @@ test("appendix approval binds to the plan and publishing uses sample checkpoints
       key: `DEV-${batches.length * 10 + index}`,
     }));
   };
+  await f.engine.action("APPROVE_APPENDIX", { questId: f.quest.id, artifactId: appendix.id });
   const publish = () =>
     f.engine.action("PUBLISH_JIRA", {
       questId: f.quest.id,
@@ -867,10 +656,7 @@ test("office commit generation and team handoff survive notification failure", a
   f.adapters.sourceControl.requestReview = async () => {
     reviewCalls++;
   };
-  await assert.rejects(
-    f.engine.action("NOTIFY_REVIEW", input),
-    /reviewers first/,
-  );
+  await assert.rejects(f.engine.action("NOTIFY_REVIEW", input), /reviewers first/);
   await f.engine.action("REQUEST_REVIEW", {
     ...input,
     reviewers: ["teammate"],
@@ -884,10 +670,7 @@ test("office commit generation and team handoff survive notification failure", a
       return { name: "spaces/test/messages/one" };
     },
   };
-  await assert.rejects(
-    f.engine.action("NOTIFY_REVIEW", input),
-    /Delivery unknown/,
-  );
+  await assert.rejects(f.engine.action("NOTIFY_REVIEW", input), /Delivery unknown/);
   assert.equal(f.store.get("works", work.id).notifiedAt, undefined);
   await f.engine.action("NOTIFY_REVIEW", input);
   await f.engine.action("NOTIFY_REVIEW", input);
@@ -915,18 +698,14 @@ test("partial weighted Jira tasks preserve every issue and block execution until
   const f = await fixture(t);
   await f.plan();
   const task = f.engine.tasks(f.quest.id)[0];
-  f.adapters.skill.publish = async () => [
-    { taskId: task.id, key: "FFE-1", complete: false },
-  ];
+  f.adapters.skill.publish = async () => [{ taskId: task.id, key: "FFE-1", complete: false }];
   await f.publish();
   assert.equal(f.store.get("tasks", task.id).jira.complete, false);
   await assert.rejects(
     f.engine.action("START_TASK", { questId: f.quest.id, taskId: task.id }),
     /Publish/,
   );
-  f.adapters.skill.publish = async () => [
-    { taskId: task.id, key: "FFE-2", complete: true },
-  ];
+  f.adapters.skill.publish = async () => [{ taskId: task.id, key: "FFE-2", complete: true }];
   await f.publish();
   assert.deepEqual(
     f.store.get("tasks", task.id).jira.issues.map((issue) => issue.key),
@@ -945,20 +724,20 @@ test("waiting brainstorm can finalize its brief without entering a plan approval
   });
   await f.engine.action("START_BRAINSTORM", { questId: q.id });
   await f.finish(
-    "DEVQUEST_WAITING_INPUT\nReady to summarize. Shall I enter plan mode?",
+    designResult("brainstorm", "", ["Should the publisher retain the existing event schema?"]),
     true,
   );
   await f.engine.action("FINISH_BRAINSTORM", { questId: q.id });
   assert.match(f.pending[0].options.prompt, /Keep the existing event schema/);
-  assert.match(f.pending[0].options.prompt, /final technical brief/i);
+  assert.match(f.pending[0].options.prompt, /final technical specification/i);
   assert.equal(f.pending[0].options.readOnly, true);
   await f.finish(
-    "# Technical brief\nUse one publisher and preserve the event schema.",
+    designResult(
+      "brainstorm",
+      "# Technical specification\nUse one publisher and preserve the event schema.",
+    ),
   );
-  assert.match(
-    f.store.content(f.store.latest(q.id, "technical-brief")),
-    /preserve the event schema/,
-  );
+  assert.match(f.store.content(f.store.latest(q.id, "spec")), /preserve the event schema/);
   await f.engine.action("ANALYZE_PRD", { questId: q.id });
   assert.equal(f.pending.length, 1);
 });
