@@ -351,6 +351,7 @@ test("Codex runtime verifies flags, streams events, disables persistence, and re
       };
     if (args.includes("--version")) return { code: 0, stdout: "codex 1.0", stderr: "" };
     options.onStdout?.('{"type":"thread.started","thread_id":"native-1"}\n');
+    options.onStdout?.('{"type":"item.started","item":{"type":"mcp_tool_call"}}\n');
     options.onStdout?.(
       `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "finished" } })}\n`,
     );
@@ -389,6 +390,25 @@ test("Codex runtime verifies flags, streams events, disables persistence, and re
   assert.equal(result.sessionId, undefined);
   assert.equal(result.waitingInput, false);
   assert.ok(events.some(({ type, text }) => type === "output" && text.includes("finished")));
+  assert.deepEqual(events.filter((event) => event.type === "heartbeat").map((event) => event.activity), ["CONNECTED", "TOOL_RUNNING", "RESPONDING"]);
+});
+
+test("Claude reports runtime activity without leaking tool inputs into progress events", async () => {
+  const events = [];
+  const runtime = new ClaudeCodeRuntime({ runner: async (_file, _args, options) => {
+    for (const event of [
+      { type: "system", subtype: "init" },
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "private-path" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", content: "private-result" }] } },
+      { type: "result", result: "done" },
+    ]) options.onStdout(JSON.stringify(event) + "\n");
+    return { code: 0, stdout: "", stderr: "" };
+  } });
+  runtime.detectCapabilities = async () => ({ available: true });
+  await runtime.start({ cwd: process.cwd(), onEvent: (event) => events.push(event) });
+  const progress = events.filter((event) => event.type === "heartbeat");
+  assert.deepEqual(progress.map((event) => event.activity), ["CONNECTED", "TOOL_RUNNING", "TOOL_FINISHED", "RESPONDING"]);
+  assert.doesNotMatch(JSON.stringify(progress), /private-path|private-result/);
 });
 
 test("Claude runtime uses native resume only when persistence is configured", async () => {

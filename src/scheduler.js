@@ -35,7 +35,7 @@ export class TaskScheduler {
     const slots = new Map(
       this.workflow.s
         .all("tasks")
-        .filter((task) => claimed.has(task.state))
+        .filter((task) => claimed.has(task.state) && !this.workflow.s.get("quests", task.questId)?.deletedAt)
         .map((task) => [task.id, task]),
     );
     for (const work of this.workflow.s.all("works"))
@@ -54,7 +54,7 @@ export class TaskScheduler {
     if (this.workflow.e.stopping) return;
     const quests = this.workflow.s
       .all("quests")
-      .filter((q) => q.workflowVersion === 2 && q.autoExecute);
+      .filter((q) => !q.deletedAt && q.workflowVersion === 2 && q.autoExecute);
     if (!quests.length) return;
     this.workflow.cursor %= quests.length;
     const ordered = [
@@ -123,6 +123,7 @@ export class TaskScheduler {
       queueMicrotask(() => this.workflow.pump());
   }
   claim(quest, task) {
+    assert(!this.workflow.s.get("quests", quest.id)?.deletedAt, "Restore the deleted project before executing tasks");
     assert(
       task.questId === quest.id && this.workflow.eligible(task),
       "Task is not eligible or dependency not integrated",

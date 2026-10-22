@@ -18,6 +18,9 @@ const tables = new Set([
   "operations",
   "decisions",
   "settings",
+  "room_messages",
+  "qa_cases",
+  "project_references",
 ]);
 
 export class Store {
@@ -64,6 +67,8 @@ export class Store {
         throw new Error("Immutable historical AgentRun attempt evidence cannot change");
       if (previous?.profileSnapshot) {
         for (const key of [
+          "registeredSkills",
+          "projectReferences",
           "profileSnapshot",
           "profileSnapshotHash",
           "runtime",

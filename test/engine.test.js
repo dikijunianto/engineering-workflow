@@ -304,8 +304,28 @@ test("restart restores registrations and marks active sessions interrupted witho
   const restarted = new Engine({ store: f.store, adapters: f.adapters });
   await restarted.initialize();
   assert.equal(f.store.all("runs").at(-1).state, "INTERRUPTED");
+  assert.equal(f.store.all("runs").at(-1).pid, null);
+  assert.match(f.store.all("runs").at(-1).recoveryReason, /Server restarted.*no run was restarted automatically/);
   assert.equal(restarted.jobs.size, 0);
   assert.ok(f.store.latest(f.quest.id, "summary"));
+});
+test("runtime progress persists without output or late events reviving stopped runs", async (t) => {
+  const f = await fixture(t);
+  await f.engine.action("ANALYZE_PRD", { questId: f.quest.id });
+  const run = f.store.all("runs").at(-1);
+  const { onEvent } = f.pending[0].options;
+  onEvent({ type: "process", pid: 123 });
+  assert.equal(f.store.get("runs", run.id).runtimeActivity, "PROCESS_STARTED");
+  onEvent({ type: "heartbeat", activity: "TOOL_RUNNING" });
+  const progress = f.store.get("runs", run.id);
+  assert.equal(progress.runtimeActivity, "TOOL_RUNNING");
+  assert.ok(progress.lastProgressAt);
+  assert.equal(progress.summary, "");
+  f.store.put("runs", { ...progress, state: "INTERRUPTED", pid: null });
+  onEvent({ type: "process", pid: 456 });
+  onEvent({ type: "heartbeat", activity: "RESPONDING" });
+  assert.equal(f.store.get("runs", run.id).pid, null);
+  assert.equal(f.store.get("runs", run.id).runtimeActivity, "TOOL_RUNNING");
 });
 test("artifact tampering is detected before approval or execution", async (t) => {
   const f = await fixture(t);

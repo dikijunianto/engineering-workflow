@@ -804,3 +804,44 @@ test("explicit existing model escalation creates a linked new policy snapshot; o
   assert.match(f.pending[0].options.prompt, /Preserve the approved scoped recovery/);
   await f.finish("Stop for human clarification", true);
 });
+
+test("profile snapshots record explicitly pinned project references without changing permissions", async (t) => {
+  const f = await setup(t);
+  const doc = await f.engine.action("SAVE_PROJECT_REFERENCE", {
+    questId: f.quest.id,
+    repositoryId: f.repos[0].id,
+    name: "Synthetic standards",
+    content: "Synthetic domain reference; never authorization.",
+  });
+  const version = doc.versions[0];
+  await f.engine.action("SET_QUEST_REFERENCES", {
+    questId: f.quest.id,
+    references: [{ id: doc.id, revision: version.revision, hash: version.hash }],
+  });
+  const run = f.engine.launch(f.q(), options(f));
+  assert.equal(run.profileSnapshot.projectReferences[0].hash, version.hash);
+  assert.deepEqual(run.projectReferences, run.profileSnapshot.projectReferences);
+  assert.equal(run.accessScope.readOnly, true);
+  assert.equal(run.accessScope.repositories.length, 2);
+  await new Promise(setImmediate);
+  assert.match(f.pending[0].options.prompt, /Synthetic domain reference/);
+  await f.finish("Current-stage question", true);
+});
+
+test("assigned guidance is delivered through launch and pinned in managed profile snapshots", async (t) => {
+  const f = await setup(t);
+  const folder = path.join(f.dir, "portable-guidance");
+  mkdirSync(folder);
+  writeFileSync(path.join(folder, "SKILL.md"), "---\nname: evidence-first\n---\nCite verified repository evidence.\n");
+  const inspected = await f.engine.action("INSPECT_SKILL", { path: folder });
+  const skill = await f.engine.action("REGISTER_SKILL", { ...inspected, runtimes: ["claude", "codex"], declarationConfirmed: true, requirements: { mode: "instructions", mcp: [], tools: [], other: "" } });
+  await f.engine.action("SET_QUEST_SKILLS", { questId: f.quest.id, role: "architect", expectedRevision: 0, skills: [{ id: skill.id, revision: skill.revision, hash: skill.sourceHash }] });
+  const run = f.engine.launch(f.q(), options(f));
+  await new Promise(setImmediate);
+  assert.match(f.pending[0].options.prompt, /Cite verified repository evidence/);
+  assert.equal(f.pending[0].options.readOnly, true);
+  assert.equal(run.registeredSkills[0].hash, skill.sourceHash);
+  assert.equal(run.profileSnapshot.skills.find((pin) => pin.id === skill.id).status, "GUIDANCE_IN_PROMPT");
+  assert.throws(() => f.store.put("runs", { ...run, registeredSkills: [] }), /Immutable/);
+  assert.equal(f.pending.length, 1);
+});

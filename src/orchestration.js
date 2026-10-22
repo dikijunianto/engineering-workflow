@@ -198,6 +198,8 @@ export class Orchestration {
           "events",
           "decisions",
           "operations",
+          "room_messages",
+          "qa_cases",
         ])
           for (const row of this.s.all(table)) this.s.remove(table, row.id);
       });
@@ -531,7 +533,7 @@ export class Orchestration {
         !this.pending.has(operation.id)
       )
         this.s.put("operations", { ...operation, state: "INTERRUPTED" });
-    for (const quest of this.s.all("quests").filter((q) => q.workflowVersion === 2)) {
+    for (const quest of this.s.all("quests").filter((q) => q.workflowVersion === 2 && !q.deletedAt)) {
       this.e.put("quests", quest, { autoExecute: false });
       for (const task of this.e.tasks(quest.id)) {
         if (

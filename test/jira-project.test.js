@@ -207,3 +207,16 @@ test("incomplete field pages and non-writable fields are not accepted as publish
   readonly[3].content = data;
   assert.throws(() => verifyJiraProject(context("FCAD"), markdown, readonly), /cannot be set/);
 });
+
+
+test("Epic keys and same-site HTTPS Epic URLs normalize before project validation", () => {
+  const base=context("FCAD");
+  assert.equal(jiraContext({...base,epic:" fcad-6205 "}).epic,"FCAD-6205");
+  assert.equal(jiraContext({...base,epic:" https://jira.example/browse/FCAD-6205 "}).epic,"FCAD-6205");
+  assert.equal(jiraContext({...base,epic:"https://jira.example/browse/fcad-6205/"}).epic,"FCAD-6205");
+  for(const epic of ["FFE-1","https://jira.example/browse/FFE-1"])
+    assert.throws(()=>jiraContext({...base,epic}),/selected project \(FCAD\)/);
+  assert.throws(()=>jiraContext({...base,epic:"https://other.example/browse/FCAD-1"}),/selected Jira site/);
+  for(const epic of ["http://jira.example/browse/FCAD-1","https://user:secret@jira.example/browse/FCAD-1","https://jira.example/browse/FCAD-1?token=x","https://jira.example/browse/FCAD-1#fragment"])
+    assert.throws(()=>jiraContext({...base,epic}));
+});

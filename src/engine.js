@@ -11,10 +11,18 @@ import { DesignStages, designContextKinds } from "./design-stages.js";
 import { JiraSettings } from "./jira-settings.js";
 import { JiraPublication } from "./jira-publication.js";
 import { AgentContextComposer, contextKinds } from "./agent-context.js";
+import { QuestRoom, roomActions } from "./quest-room.js";
+import { readiness } from "./readiness.js";
+import { SkillRegistry, skillActions } from "./skills.js";
 
 const active = new Set(["RUNNING", "WAITING_INPUT", "PAUSED", "INTERRUPTED"]);
 const profiles = new Set(["node-test", "npm-test", "go-test", "pytest"]);
 export const ACTIONS = new Set([
+  ...skillActions,
+  "CHECK_READINESS",
+  "DELETE_QUEST",
+  "RESTORE_QUEST",
+  ...roomActions,
   "PICK_REPOSITORY_FOLDER",
   "INSPECT_REPOSITORY_FOLDER",
   "REGISTER_REPOSITORY",
@@ -127,6 +135,8 @@ export class Engine {
     this.jiraSettings = new JiraSettings(this);
     this.publication = new JiraPublication(this);
     this.agentContexts = new AgentContextComposer(this);
+    this.room = new QuestRoom(this);
+    this.skills = new SkillRegistry(this);
   }
   exclusive(fn) {
     // ponytail: short actions and validation are serialized; use per-work queues if test latency impedes interaction.
@@ -182,6 +192,9 @@ export class Engine {
   }
   approvalBasis(questId, kind) {
     return JSON.stringify({
+      ...(this.get("quests", questId).referenceConfigurationId
+        ? { referenceConfigurationId: this.get("quests", questId).referenceConfigurationId }
+        : {}),
       source: (
         (this.store.latest(questId, "spec")?.sourceStage === "brainstorm"
           ? this.store.latest(questId, "spec")
@@ -327,15 +340,21 @@ export class Engine {
   snapshot() {
     this.appendixAgent.reconcile();
     const data = {};
+    data.skills = this.skills.snapshot();
     for (const name of ["repositories", "quests", "tasks", "works", "runs", "approvals", "events"])
       data[name] = this.store.all(name);
+    data.deletedQuests = data.quests.filter((q) => q.deletedAt).map(({ id, title, kind, deletedAt, deletionReason }) => ({ id, title, kind, deletedAt, deletionReason }));
+    const deleted = new Set(data.deletedQuests.map((q) => q.id));
+    data.quests = data.quests.filter((q) => !deleted.has(q.id));
+    for (const name of ["tasks", "works", "runs", "approvals", "events"])
+      data[name] = data[name].filter((item) => !deleted.has(item.questId));
     data.runs = data.runs.map((run) =>
       run.purpose === appendixPurpose ? { ...run, ...this.appendixAgent.status(run) } : run,
     );
     data.events = data.events.slice(-150).reverse();
     data.artifacts = this.store
       .all("artifacts")
-      .filter((a) => this.store.latest(a.questId, a.kind)?.id === a.id)
+      .filter((a) => !deleted.has(a.questId) && this.store.latest(a.questId, a.kind)?.id === a.id)
       .map((a) => {
         try {
           return {
@@ -375,10 +394,21 @@ export class Engine {
           return { ...a, content: "", error: e.message };
         }
       });
+    data.qaCases = this.store.all("qa_cases").filter((item) => !deleted.has(item.questId));
+    data.projectReferences = this.store
+      .all("project_references")
+      .map((doc) => ({ ...doc, versions: doc.versions.slice(-1) }));
+    data.questRooms = Object.fromEntries(
+      data.quests.map((q) => [
+        q.id,
+        { timeline: this.room.timeline(q.id), blockers: this.room.blockers(q) },
+      ]),
+    );
     data.runtimes = this.runtimeStatus;
-    data.routingDecisions = this.store.all("decisions").slice(-100);
+    data.routingDecisions = this.store.all("decisions").filter((item) => !deleted.has(item.questId)).slice(-100);
     data.operations = this.store
       .all("operations")
+      .filter((item) => !deleted.has(item.questId))
       .slice(-100)
       .map((op) =>
         op.id === `appendix:${op.questId}` ? { ...op, ...this.appendixAgent.status(op, true) } : op,
@@ -432,7 +462,7 @@ export class Engine {
       }
     }
     await this.reconcile();
-    for (const quest of this.store.all("quests"))
+    for (const quest of this.store.all("quests").filter((q) => !q.deletedAt))
       if (this.tasks(quest.id).some((task) => task.jira) && !this.store.latest(quest.id, "ticket"))
         this.saveTickets(quest);
   }
@@ -510,8 +540,55 @@ export class Engine {
       return { valid: false, path: selected.path, error: error.message };
     }
   }
+  projectCleanup(type, p) {
+    const quest = this.get("quests", p.questId);
+    if (type === "RESTORE_QUEST") {
+      requireValue(quest.deletedAt && p.deletedAt === quest.deletedAt,
+        "Deleted project changed; refresh before restoring");
+      this.put("quests", quest, { deletedAt: null, autoExecute: false });
+      this.log(quest.id, "Project restored. Automation remains paused; review saved progress before continuing.");
+      return { restored: true, questId: quest.id };
+    }
+    if (quest.deletedAt) return { deleted: true, questId: quest.id };
+    requireValue(p.confirmTitle === quest.title, "Type the project title to confirm deletion");
+    requireValue(p.expectedUpdatedAt === (quest.updatedAt || quest.createdAt),
+      "Project changed; refresh and review it before deleting");
+    requireValue(!quest.autoExecute, "Pause project automation before deleting");
+    const runs = this.store.all("runs").filter((run) => run.questId === quest.id);
+    const operations = this.store.all("operations").filter((op) => op.questId === quest.id);
+    requireValue(
+      !runs.some((run) => run.state === "RUNNING" || this.jobs.has(run.id) || processAlive(run.pid)) &&
+      !operations.some((op) => op.state === "RUNNING" || this.v11.pending.has(op.id) || processAlive(op.pid)) &&
+      !this.appendixAgent.preflights.has(quest.id) &&
+      !this.tasks(quest.id).some((task) => ["PREPARING", "RUNNING", "INTEGRATION_QUEUED", "INTEGRATING"].includes(task.state)) &&
+      !this.works(quest.id).some((work) =>
+        ["PREPARING", "FIXING", "INTEGRATING"].includes(work.state) ||
+        this.v11.integrationLocks.has(work.id) || this.v11.integrationLocks.has(`${quest.id}:${work.repoId}`)),
+      "Finish or interrupt active agents and background operations before deleting this project",
+    );
+    requireValue(p.reason == null || typeof p.reason === "string" && p.reason.length <= 500,
+      "Deletion reason must be at most 500 characters");
+    // Recoverable removal keeps worktrees, publication manifests and audit history intact.
+    this.put("quests", quest, {
+      deletedAt: now(), deletionReason: (p.reason || "").trim(), autoExecute: false,
+    });
+    this.log(quest.id, "Project moved to Deleted projects. Local work, documents and external issues are preserved.");
+    return { deleted: true, questId: quest.id };
+  }
   async dispatch(type, p, coordinated = false) {
     const s = this.store;
+    if (["DELETE_QUEST", "RESTORE_QUEST"].includes(type)) return this.projectCleanup(type, p);
+    const referencedQuests = [
+      p.questId,
+      ...[["runId", "runs"], ["taskId", "tasks"], ["workId", "works"],
+        ["artifactId", "artifacts"], ["appendixArtifactId", "artifacts"], ["caseId", "qa_cases"]]
+        .map(([key, table]) => p[key] && s.get(table, p[key])?.questId),
+    ];
+    requireValue(!referencedQuests.some((key) => key && s.get("quests", key)?.deletedAt),
+      "Project is deleted. Restore it from Deleted projects before making changes or starting agents.");
+    if (type === "CHECK_READINESS") return readiness(this, p);
+    if (skillActions.includes(type)) return this.skills.action(type, p);
+    if (roomActions.includes(type)) return this.room.action(type, p);
     if (!coordinated && this.v11.handles(type, p)) return this.v11.dispatch(type, p);
     if (type === "SAVE_WORKSPACE_JIRA") return this.jiraSettings.save(p);
     if (type === "REGISTER_REPOSITORY") {
@@ -587,6 +664,13 @@ export class Engine {
         "Invalid Quest human reviewers",
       );
       requireValue(["PRODUCT", "TECH"].includes(p.kind), "Select Product or Tech Quest");
+      requireValue(
+        p.existingJiraKey == null ||
+          (p.kind === "TECH" &&
+            typeof p.existingJiraKey === "string" &&
+            /^[A-Z][A-Z0-9_]*-\d+$/.test(p.existingJiraKey)),
+        "Existing QA issue requires a valid Jira key and a Tech Quest",
+      );
       const title = text(p.title, "Title", 160);
       const repositories = p.repositoryIds?.length
         ? p.repositoryIds
@@ -609,6 +693,7 @@ export class Engine {
         id: id(),
         title,
         kind: p.kind,
+        ...(p.existingJiraKey ? { existingJiraKey: p.existingJiraKey } : {}),
         state: "INTAKE_READY",
         repositoryIds: [...new Set(repositories)],
         sources,
@@ -1606,6 +1691,7 @@ export class Engine {
   }
   async schedule(questId, runtime) {
     const quest = this.get("quests", questId);
+    if (quest.deletedAt) return;
     if (quest.workflowVersion === 2) {
       this.v11.pump();
       return;
@@ -1710,46 +1796,9 @@ export class Engine {
       return this.v11.design(quest, type === "GENERATE_PLAN" ? "planner" : "architect", options);
     return this.launch(quest, options);
   }
-  launch(quest, options, existing) {
-    const predecessor =
-      existing ||
-      (options.recoveryFrom && this.store.get("runs", options.recoveryFrom)) ||
-      (options.continuationOf && this.store.get("runs", options.continuationOf)) ||
-      (options.policyChangeFrom && this.store.get("runs", options.policyChangeFrom));
-    requireValue(
-      !(options.recoveryFrom || options.continuationOf || options.policyChangeFrom) || predecessor,
-      "Continuation predecessor not found; select an existing AgentRun",
-    );
-    const managedContinuation = predecessor?.profileSnapshot && !options.policyChangeFrom;
-    if (managedContinuation)
-      options = {
-        ...options,
-        route: predecessor.route,
-        runtime: predecessor.runtime,
-        continuationMessage: options.continuationMessage,
-      };
-    requireValue(
-      this.jobs.size < (options.workflowVersion === 2 ? 16 : this.concurrency),
-      "Local concurrency limit reached",
-    );
-    const runtime = this.adapters.runtimes[options.runtime];
-    requireValue(runtime, "Unknown runtime");
-    requireValue(
-      this.runtimeStatus[options.runtime]?.available !== false,
-      `${options.runtime} is not available`,
-    );
-    // Rebuild grants from current registered Quest/work records on every continuation.
+  resolveAccessScope(quest, options) {
     const design = !options.workId && !options.taskId;
     const review = options.role === "reviewer" || options.purpose === "review";
-    requireValue(
-      !design || options.readOnly === true,
-      "Architect and Planner repository access must be read-only",
-    );
-    requireValue(
-      !["architect", "planner", "reviewer", "orchestrator"].includes(options.role) ||
-        options.readOnly === true,
-      "Reasoning and review roles must remain read-only",
-    );
     const repositories = options.artifactScope
       ? [{ id: quest.id, name: "Approved Quest documents", path: options.cwd }]
       : design
@@ -1779,19 +1828,62 @@ export class Engine {
                 path: options.cwd,
               },
             ];
-    options = {
-      ...options,
-      accessScope: {
-        cwd: design ? repositories[0].path : options.cwd,
-        readOnly: options.readOnly,
-        repositories,
-        forbiddenWriteDirectories: this.store.all("repositories").map((repo) => repo.path),
-      },
+    return {
+      cwd: design ? repositories[0].path : options.cwd,
+      readOnly: options.readOnly,
+      repositories,
+      forbiddenWriteDirectories: this.store.all("repositories").map((repo) => repo.path),
     };
+  }
+  launch(quest, options, existing) {
+    requireValue(!this.get("quests", quest.id).deletedAt, "Restore the deleted project before starting an agent");
+    const predecessor =
+      existing ||
+      (options.recoveryFrom && this.store.get("runs", options.recoveryFrom)) ||
+      (options.continuationOf && this.store.get("runs", options.continuationOf)) ||
+      (options.policyChangeFrom && this.store.get("runs", options.policyChangeFrom));
+    requireValue(
+      !(options.recoveryFrom || options.continuationOf || options.policyChangeFrom) || predecessor,
+      "Continuation predecessor not found; select an existing AgentRun",
+    );
+    const managedContinuation = predecessor?.profileSnapshot && !options.policyChangeFrom;
+    if (managedContinuation)
+      options = {
+        ...options,
+        route: predecessor.route,
+        runtime: predecessor.runtime,
+        continuationMessage: options.continuationMessage,
+      };
+    requireValue(
+      this.jobs.size < (options.workflowVersion === 2 ? 16 : this.concurrency),
+      "Local concurrency limit reached",
+    );
+    const runtime = this.adapters.runtimes[options.runtime];
+    requireValue(runtime, "Unknown runtime");
+    requireValue(
+      this.runtimeStatus[options.runtime]?.available !== false,
+      `${options.runtime} is not available`,
+    );
+    // Rebuild grants from current registered Quest/work records on every continuation.
+    const design = !options.workId && !options.taskId;
+    requireValue(
+      !design || options.readOnly === true,
+      "Architect and Planner repository access must be read-only",
+    );
+    requireValue(
+      !["architect", "planner", "reviewer", "orchestrator"].includes(options.role) ||
+        options.readOnly === true,
+      "Reasoning and review roles must remain read-only",
+    );
+    options = { ...options, accessScope: this.resolveAccessScope(quest, options) };
     options.cwd = options.accessScope.cwd;
     const runId = existing && !managedContinuation ? existing.id : id();
     if (quest.agentProfiles?.enabled && !options.route && !predecessor)
       options.route = runtime.defaultRoute;
+    const referenceContext = this.room.references(quest, options, predecessor);
+    options.projectReferences = referenceContext.pins;
+    options.prompt = String(options.prompt || "") + referenceContext.prompt;
+    options = this.skills.prepare(quest, options, options.policyChangeFrom ? undefined : predecessor);
     options = this.agentContexts.prepare(
       quest,
       options,
@@ -1851,6 +1943,8 @@ export class Engine {
             phase: "CREATED",
           }
         : {}),
+      registeredSkills: options.registeredSkills,
+      projectReferences: referenceContext.pins,
       stage: options.stage || options.purpose,
       role:
         options.role ||
@@ -1874,6 +1968,9 @@ export class Engine {
       cliArguments: null,
       fingerprint: options.fingerprint,
       state: "RUNNING",
+      runtimeActivity: "STARTING",
+      lastProgressAt: null,
+      recoveryReason: null,
       summary: existing?.summary || "",
       sessionId: managed ? undefined : existing?.sessionId,
       pid: null,
@@ -1907,6 +2004,23 @@ export class Engine {
         sessionId: run.sessionId,
         signal: controller.signal,
         onEvent: (event) => {
+          const latest = this.get("runs", run.id);
+          // Late process output must not revive an interrupted or finished turn.
+          if (latest.state !== "RUNNING") return;
+          const activity = event.type === "process" ? "PROCESS_STARTED" : event.activity;
+          if (
+            ["heartbeat", "process", "output", "runtime-tool", "repository-tool"].includes(event.type) &&
+            (!latest.lastProgressAt ||
+              (activity && activity !== latest.runtimeActivity) ||
+              Date.now() - Date.parse(latest.lastProgressAt) >= 1000)
+          ) {
+            const progress = {
+              lastProgressAt: now(),
+              ...(activity ? { runtimeActivity: activity } : {}),
+            };
+            this.put("runs", latest, progress);
+            this.emit({ type: "run-progress", runId: run.id, ...progress });
+          }
           if (options.purpose === appendixPurpose) {
             const current = this.get("runs", run.id);
             this.put("runs", current, {
@@ -1975,7 +2089,7 @@ export class Engine {
           } else if (event.type === "process") {
             const current = this.get("runs", run.id);
             this.put("runs", current, { pid: event.pid });
-          } else
+          } else if (event.type === "output")
             this.emit({
               type: "output",
               runId: run.id,
@@ -2378,7 +2492,11 @@ export class Engine {
     for (const quest of this.store.all("quests")) this.put("quests", quest, { autoExecute: false });
     for (const run of this.store.all("runs"))
       if (run.purpose !== appendixPurpose && run.state === "RUNNING" && !this.jobs.has(run.id)) {
-        const interrupted = this.put("runs", run, { state: "INTERRUPTED" });
+        const interrupted = this.put("runs", run, {
+          state: "INTERRUPTED",
+          pid: null,
+          recoveryReason: "Server restarted without an attached agent process. Review the saved progress before continuing; no run was restarted automatically.",
+        });
         if (run.taskId)
           this.put("tasks", this.get("tasks", run.taskId), {
             state: "INTERRUPTED",

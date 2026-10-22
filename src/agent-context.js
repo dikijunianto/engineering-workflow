@@ -231,6 +231,7 @@ export class AgentContextComposer {
           }
         : { name, status: "UNAVAILABLE" };
     });
+    skills.push(...(options.registeredSkills || []));
     if (options.nativeSkill)
       skills.push({
         name: options.nativeSkill,
@@ -280,6 +281,11 @@ export class AgentContextComposer {
       check(
         JSON.stringify(snapshot.inputArtifacts) === JSON.stringify(artifacts),
         "input artifact revisions changed; start a new run",
+      );
+      check(
+        JSON.stringify(snapshot.projectReferences || []) ===
+          JSON.stringify(options.projectReferences || []),
+        "pinned project reference scope changed",
       );
       const stable = (values) =>
         values.map(({ repositoryId, sourcePath, hash, status, commit }) => ({
@@ -338,6 +344,7 @@ export class AgentContextComposer {
         repositoryStandards: standards.map(({ content, ...p }) => p),
         skills,
         inputArtifacts: artifacts,
+        projectReferences: options.projectReferences || [],
         createdAt: new Date().toISOString(),
         request: this.s.agentContext(request),
       };

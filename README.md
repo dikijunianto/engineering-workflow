@@ -67,3 +67,61 @@ npm run check
 Tests cover approval revision checks, dependency validation, repository serialization, interruption/recovery, partial Jira publication, review invalidation, local HTTP boundaries, file intake and a full two-repository Git fixture. Tests use fake external providers and never consume agent credits or create real Jira issues/PRs. See [verification notes](docs/verification.md) for the delivery evidence and remaining machine-specific checks.
 
 Architecture: [approved design](docs/superpowers/specs/2026-09-06-devquest-v1-design.md). Execution scope and file boundaries: [implementation plan](docs/superpowers/plans/2026-09-06-devquest-v1.md).
+
+## Quest room, QA and references
+
+Open a project's **Room** for agent turn summaries, questions and saved owner notes.
+Notes never start an agent or become instructions automatically. **Send an
+instruction** targets a stopped current-stage turn, explicitly starts agent work
+and may consume provider usage. Existing continuation, permissions and approval
+checks apply. Historical stages remain view-only after downstream documents exist.
+
+**Overview → Project attention** explains waiting or failed work. **Project settings → Technical details → Preview agent
+access** uses the same repository scope resolver as execution and checks OS access
+without starting a model. Successful preview does not prove runtime tool access.
+
+**Work → Tests and QA** records human test scenarios and observations against a clean integrated
+Quest commit. Link an existing QA Jira key without creating an issue. Recheck
+saved evidence after source changes. The checklist supplements existing automated
+validation/review; it is not a new release gate and never claims a human test was
+executed by an agent.
+
+**Project settings → References** stores versioned Markdown by repository. Explicitly attach selected
+revisions to an idle, pre-execution Quest; this invalidates prior design approvals.
+Library edits preserve prior revisions and never refresh Quests silently. Agents
+receive only references in their assigned repository scope; continuations retain
+original versions. Jira skills continue to use approved documents and fresh Jira
+metadata, not these references as a replacement for verified options.
+
+
+The project workspace has four tabs: **Overview**, **Documents**, **Work** and
+**Room**. Overview highlights the next action; alternative actions and technical
+settings are collapsed. Existing links still work. The five-stage display groups
+existing stages without changing approval requirements. New intake offers a
+feature, technical improvement or existing QA bug; Jira linking still happens
+explicitly after plan approval. See [UI simplification](docs/v1.2/ui-simplification.md).
+
+The **Skills** page registers local skill folders and shows declared Claude/Codex
+compatibility, MCP/tool requirements and setup that still needs review. Registration
+does not activate a skill or grant permissions. Existing workflow integrations stay
+unchanged. Project settings can explicitly assign reviewed instructions-only
+revisions to a role; source/runtime drift blocks launch. Settings and Project
+settings offer non-generative readiness checks. Room replies show acceptance and
+linked attempt receipts. See [Skill registry](docs/v1.2/skill-registry.md) and
+[Readiness and assigned guidance](docs/v1.2/readiness-and-guidance.md).
+
+Use **Delete** on a project row to move canceled work to **Deleted projects**.
+Restore remains available, and repository worktrees, documents and Jira/PR history
+are preserved. Active agents and background work must be stopped first. See
+[Project cleanup](docs/v1.2/project-cleanup.md).
+
+The workspace uses compact headers, neutral dark surfaces and direct workflow
+labels. Overview prioritizes projects and recent activity; optional sprint and
+technical information appear only when relevant. See
+[Workspace presentation](docs/v1.2/ui-simplification.md#workspace-presentation-update).
+
+The interface now uses a shared [design system](docs/design/design-system.md):
+compact expandable agent/task rows, exact project substages, concise Jira notices,
+grouped settings and accessible mobile navigation. Lucide icons are vendored
+locally with [pinned provenance and license notices](docs/design/asset-provenance.json).
+Workflow actions, artifact approvals and runtime/repository permissions are unchanged.

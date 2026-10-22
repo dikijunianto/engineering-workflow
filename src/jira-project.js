@@ -1,3 +1,4 @@
+import { epicInput } from "./routing.js";
 import { validateAppendix } from "./appendix-markdown.js";
 
 const check = (condition, message) => {
@@ -16,9 +17,11 @@ export function jiraContext(input = {}) {
     context.project.length <= 80 && /^[A-Z][A-Z0-9_]*$/.test(context.project),
     "Use a valid Jira project key",
   );
+  const epic = epicInput(context.epic);
+  context.epic = epic.epicKey;
   check(
     !context.epic || new RegExp(`^${context.project}-\\d+$`).test(context.epic),
-    "Jira Epic must belong to the selected project",
+    `Jira Epic must belong to the selected project (${context.project}); use ${context.project}-123 or an Epic URL from that project.`,
   );
   for (const key of ["siteUrl", "projectUrl"]) {
     if (!context[key]) continue;
@@ -41,6 +44,10 @@ export function jiraContext(input = {}) {
       check(project === context.project, "Jira project URL must identify the selected project");
     }
   }
+  const configuredSite = context.siteUrl || context.projectUrl;
+  if (epic.epicUrl && configuredSite)
+    check(new URL(epic.epicUrl).origin === new URL(configuredSite).origin,
+      "Jira Epic URL must use the selected Jira site");
   if (context.siteUrl && context.projectUrl)
     check(
       new URL(context.siteUrl).origin === new URL(context.projectUrl).origin,

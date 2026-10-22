@@ -60,13 +60,15 @@ test("loopback API rejects foreign origins, spoofed hosts, missing token and arb
   const markdownModule = await fetch(`${app.url}/vendor/marked.js`);
   assert.equal(markdownModule.status, 200);
   assert.match(markdownModule.headers.get("content-type"), /text\/javascript/);
-  const art = await fetch(`${app.url}/devquest/backgrounds/midnight-reach.png`);
-  assert.equal(art.status, 200);
-  assert.match(art.headers.get("content-type"), /^image\/png/);
-  assert.deepEqual(
-    [...new Uint8Array(await art.arrayBuffer()).slice(0, 4)],
-    [137, 80, 78, 71],
-  );
+  const icons = await fetch(`${app.url}/icons/lucide.svg`);
+  assert.equal(icons.status, 200);
+  assert.match(icons.headers.get("content-type"), /^image\/svg\+xml/);
+  const sprite = await icons.text();
+  assert.match(sprite, /<symbol id="workflow"/);
+  assert.doesNotMatch(sprite, /<script|onload=/i);
+  const license = await fetch(`${app.url}/icons/LICENSE-lucide.txt`);
+  assert.match(await license.text(), /ISC License/);
+  assert.equal((await fetch(`${app.url}/devquest/backgrounds/midnight-reach.png`)).status, 404);
   const foreign = await fetch(`${app.url}/api/state`, {
     headers: { Origin: "https://malicious.example" },
   });
@@ -99,7 +101,12 @@ test("loopback API rejects foreign origins, spoofed hosts, missing token and arb
     ).status,
     403,
   );
-  const { token } = await (await fetch(`${app.url}/api/session`)).json();
+  const session = await (await fetch(`${app.url}/api/session`)).json();
+  const { token } = session;
+  assert.equal(session.restartRequired, false);
+  assert.equal(session.loadedBuild, session.diskBuild);
+  assert.ok(session.actions.includes("CHECK_READINESS"));
+  assert.ok(session.actions.includes("SET_QUEST_SKILLS"));
   const send = (value) =>
     fetch(`${app.url}/api/action`, {
       method: "POST",

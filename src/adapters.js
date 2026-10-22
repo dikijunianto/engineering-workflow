@@ -818,7 +818,25 @@ export class AgentRuntime {
           servers: (parsed.mcp_servers || []).map((s) => ({ name: s.name, status: s.status })),
           tools: (parsed.tools || []).filter((t) => t.startsWith("mcp__")),
         });
-      if (nativeSkill) onEvent?.({ type: "heartbeat" });
+      if (parsed && typeof parsed === "object") {
+        const blocks = parsed.message?.content;
+        const toolItem = ["mcp_tool_call", "command_execution", "file_change", "web_search"].includes(
+          parsed.item?.type,
+        );
+        const activity =
+          blocks?.some?.((block) => block.type === "tool_use") ||
+          (toolItem && parsed.type === "item.started")
+            ? "TOOL_RUNNING"
+            : blocks?.some?.((block) => block.type === "tool_result") ||
+                (toolItem && parsed.type === "item.completed")
+              ? "TOOL_FINISHED"
+              : parsed.type === "system" || parsed.type === "thread.started"
+                ? "CONNECTED"
+                : event.text
+                  ? "RESPONDING"
+                  : undefined;
+        onEvent?.({ type: "heartbeat", ...(activity ? { activity } : {}) });
+      }
       if (
         nativeSkill &&
         parsed?.type === "system" &&
