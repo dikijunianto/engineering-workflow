@@ -183,6 +183,9 @@ export class AgentContextComposer {
           : options.purpose === "v11-conflict"
             ? work.path
             : task?.workspace?.path || work.path;
+      if (options.purpose === "v11-target")
+        check(work.questId === quest.id && work.targetRecovery?.state === "MERGING" && !options.taskId,
+          "PR conflict repair requires the recorded target merge");
       if (options.purpose === "v11-conflict")
         check(task?.commit && task.questId === quest.id && work.questId === quest.id &&
           task.repoId === work.repoId && work.integration?.taskId === task.id && work.integration.commit === task.commit,

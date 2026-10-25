@@ -1,0 +1,13 @@
+# PR conflict recovery
+
+The repository handoff card offers **Resolve PR conflicts**. Its confirmation explains potential paid Developer/reviewer usage. The backend checks the current epic commit, idle agents, completed tasks, clean owned worktree and latest remote PR target. Git `merge-tree` must report an actual content conflict before any clean branch is created. No conflict means no snapshot, merge or model run; existing publication/readiness protections remain in force.
+
+For a conflict, DevQuest atomically creates `<epic-branch>-clean` at the current epic HEAD. It preserves that local staging snapshot, records its SHA, and starts a non-committed target merge on the **original epic branch**. A restricted Developer resolves files there; the backend verifies the original HEAD, pending target, unchanged snapshot, resolved index and passing validation before creating the merge commit. No PR, push, Jira operation or staging merge occurs in this action.
+
+All affected cross-repository reviews are invalidated and repeated. The repaired repository requires fresh exact-commit human approval even in autonomous mode. Normal publication then updates/reuses the original source branch's PR through its existing Git/provider reconciliation. The prior PR link remains available during repair. Target movement blocks stale publication again.
+
+Occupied worktrees, foreign merges, dirty files, stale heads, missing validation, changed snapshots and branch-name collisions stop safely. A pre-existing `-clean` branch is never overwritten. Interrupted state stays recorded; bounded retries reuse the pending merge and snapshot. Waiting-input answers do not spend repair retries. A second target recovery after completion requires explicit manual inspection; this slice never replaces the first clean snapshot.
+
+The snapshot contains exactly the pre-repair epic history; it cannot remove development commits previously merged by another process. Later business fixes on the development-specific branch are not automatically copied into the snapshot. Review those fixes separately before a future staging PR. The snapshot is local until explicitly pushed through Git; staging publication is a separate human action.
+
+Regression tests use local Git repositories with a master baseline, conflicting development changes, a separate epic worktree and fake agents. They verify exact snapshot contents, original-branch merge, failed/unresolved validation gates, no-conflict behavior, ownership/concurrency protections, collision handling, continuation, fresh human approval and visible UI state. No live project recovery or paid model is used to validate this feature.

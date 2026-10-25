@@ -1838,4 +1838,17 @@ main { min-height:calc(100vh - 56px); }
 .btn.primary:hover:not(:disabled) { background:#6ee7b7; border-color:#6ee7b7; }
 @media(max-width:850px) { #sidebar-content { grid-column:1/-1; margin-top:0; } }
 
+/* Jira Tasks grouped issue pills and filter bar */
+.jira-filter-bar { display:flex; flex-wrap:wrap; align-items:flex-end; gap:12px; border-bottom:1px solid var(--line); padding:14px 18px; background:var(--bg); }
+.jira-filter-field { display:grid; gap:4px; margin:0; font-size:11px; color:var(--muted); min-width:180px; }
+.jira-filter-field input, .jira-filter-field select { margin-top:0; height:34px; padding:4px 10px; font-size:12px; }
+.jira-issue-group { display:grid; gap:6px; }
+.jira-issue-inline { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.jira-issue-pill { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:6px; border:1px solid #34d39940; background:#34d39914; color:#6ee7b7; font:600 12px/1.5 var(--mono); text-decoration:none; }
+.jira-issue-pill:hover { background:#34d39926; border-color:#34d39980; color:#a7f3d0; }
+.jira-more-issues { margin-top:2px; }
+.jira-more-issues > summary { cursor:pointer; font-size:11px; color:var(--muted); user-select:none; padding:2px 0; }
+.jira-more-issues > summary:hover { color:var(--text); }
+.jira-more-issues[open] > .jira-issue-inline { margin-top:6px; padding-top:6px; border-top:1px dashed var(--line); }
+
 }

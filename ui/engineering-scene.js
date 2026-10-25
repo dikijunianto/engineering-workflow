@@ -9,6 +9,15 @@ export const STATIONS = [
   { id: "worktrees", name: "Isolated worktrees", x: 0, z: 5, color: 0x65cba7 },
   { id: "review", name: "Independent review", x: -8, z: 5, color: 0xc998c3 },
 ];
+export const STAGE_CAMERAS = [
+  { yaw: 0.32, pitch: 0.74, zoom: 1.04 }, // 0: Full 3D Pipeline
+  { yaw: 0.42, pitch: 0.68, zoom: 1.08 }, // 1: Intake & Repositories
+  { yaw: -0.28, pitch: 0.66, zoom: 1.08 }, // 2: Repository Analysis
+  { yaw: 0.36, pitch: 0.68, zoom: 1.08 }, // 3: TRD & Planning
+  { yaw: -0.34, pitch: 0.65, zoom: 1.08 }, // 4: Jira Backlog
+  { yaw: 0.26, pitch: 0.7, zoom: 1.08 }, // 5: Isolated Worktrees
+  { yaw: -0.32, pitch: 0.66, zoom: 1.08 }, // 6: Independent Review
+];
 export function cameraFrame(bounds, aspect, yaw = 0.38, pitch = 0.78, zoom = 1) {
   const center = bounds.getCenter(new T.Vector3());
   const direction = new T.Vector3(
@@ -306,13 +315,12 @@ export function createEngineeringScene(canvas, labels, onSelect, onFail, onPhase
     wanted = new T.Vector3(),
     desired = new T.Vector3();
   function bounds() {
-    const b = new T.Box3().setFromObject(selected ? stations[selected - 1] : world);
-    if (selected === 5) b.union(new T.Box3().setFromObject(stations[5]));
-    return b;
+    return new T.Box3().setFromObject(selected ? stations[selected - 1] : world);
   }
   function frameTarget() {
-    const fit = cameraFrame(bounds(), camera.aspect, yaw, pitch, zoom);
+    const fit = cameraFrame(bounds(), camera.aspect, yaw, pitch, zoom * (selected ? 1.12 : 1.08));
     wanted.copy(fit.center);
+    wanted.y -= selected ? 0.36 : 0.32;
     desired.copy(fit.position);
     transition = true;
     request();
@@ -383,7 +391,7 @@ export function createEngineeringScene(canvas, labels, onSelect, onFail, onPhase
     totalMs += performance.now() - begin;
     labelNodes.forEach((el, i) => {
       const v = new T.Vector3(STATIONS[i].x, 3.5, STATIONS[i].z).project(camera);
-      const visible = (!selected || selected === i + 1 || (selected === 5 && i === 5)) && v.z < 1;
+      const visible = (!selected || selected === i + 1) && v.z < 1;
       el.hidden = !visible;
       el.style.left = `${Math.max(80, Math.min(canvas.clientWidth - 80, ((v.x + 1) / 2) * canvas.clientWidth))}px`;
       el.style.top = `${Math.max(32, Math.min(canvas.clientHeight - 80, ((-v.y + 1) / 2) * canvas.clientHeight))}px`;
@@ -416,9 +424,10 @@ export function createEngineeringScene(canvas, labels, onSelect, onFail, onPhase
   canvas.addEventListener("webglcontextlost", lost);
   function control(action, a = 0, b = 0) {
     if (action === "reset") {
-      yaw = 0.38;
-      pitch = 0.78;
-      zoom = 1;
+      const preset = STAGE_CAMERAS[selected] || STAGE_CAMERAS[0];
+      yaw = preset.yaw;
+      pitch = preset.pitch;
+      zoom = preset.zoom;
     }
     if (action === "orbit") {
       yaw = T.MathUtils.clamp(yaw + a, -0.65, 0.8);
@@ -458,14 +467,13 @@ export function createEngineeringScene(canvas, labels, onSelect, onFail, onPhase
       packet.visible = false;
       scanner.position.z = -0.4;
       screens.forEach((screen) => (screen.scale.y = 1));
-      conveyors.forEach((c) => (c.mesh.visible = !selected || (selected === 5 && c.a === 4)));
+      conveyors.forEach((c) => (c.mesh.visible = !selected));
       floor.visible = !selected;
-      stations.forEach(
-        (g, i) => (g.visible = !selected || i === selected - 1 || (selected === 5 && i === 5)),
-      );
-      yaw = 0.38;
-      pitch = 0.78;
-      zoom = 1;
+      stations.forEach((g, i) => (g.visible = !selected || i === selected - 1));
+      const preset = STAGE_CAMERAS[selected] || STAGE_CAMERAS[0];
+      yaw = preset.yaw;
+      pitch = preset.pitch;
+      zoom = preset.zoom;
       frameTarget();
     },
     control,

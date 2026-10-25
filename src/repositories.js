@@ -300,7 +300,7 @@ export class RepositoryOperations {
     });
     return this.git.inspect(
       workspace.path,
-      await this.base(repo, workspace.prTarget || repo.prTarget),
+      (workspace.targetRecovery && workspace.targetRecovery.target === workspace.prTarget && workspace.targetRecovery.targetHead) || await this.base(repo, workspace.prTarget || repo.prTarget),
     );
   }
   async commit(repo, workspace, message) {
@@ -382,7 +382,11 @@ export class RepositoryOperations {
     return (await this.inspect(repo, work)).head;
   }
   async target(repo, work, target) {
-    const targetHead = await this.base(repo, target);
+    let targetHead;
+    if (work.targetRecovery?.target === target) {
+      await this.command(repo.path,["fetch","--no-tags","origin",`refs/heads/${target}:refs/remotes/origin/${target}`]);
+      targetHead=await this.command(repo.path,["rev-parse","--verify",`refs/remotes/origin/${target}^{commit}`]);
+    } else targetHead = await this.base(repo, target);
     const related = await this.command(
       work.path,
       ["merge-base", work.baseCommit, targetHead],

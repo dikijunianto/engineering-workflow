@@ -22,6 +22,7 @@ import {
   User,
   Box,
   Play,
+  AlertTriangle,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/card";
 import { Button } from "./components/button";
@@ -45,7 +46,7 @@ import {
 } from "./components/dialog";
 import { Agents } from "./agents";
 import { Sidebar } from "./sidebar";
-import { ProjectDetail } from "./project-detail";
+import { ProjectDetail, getStageLabel, latestRunAttempts } from "./project-detail";
 import { Avatar, AvatarFallback } from "./components/avatar";
 import { dashboardData, projectStatus, workspaceSearch, sampleProjects } from "./model";
 import {
@@ -67,7 +68,13 @@ const date = (value) =>
 const go = (href) => {
   location.hash = href;
 };
-function StatCard({ label, value, icon: Icon, href }) {
+function StatCard({ label, value, subtitle, tone = "neutral", icon: Icon, href }) {
+  const badgeTone =
+    tone === "warning"
+      ? "border-amber-500/30 bg-amber-500/10 text-amber-300"
+      : tone === "emerald"
+        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+        : "border-zinc-800 bg-zinc-900/80 text-muted-foreground";
   return (
     <a href={href} className="dq-stat-link group">
       <Card className="border-border/50 bg-card transition-colors hover:border-zinc-600">
@@ -78,13 +85,11 @@ function StatCard({ label, value, icon: Icon, href }) {
           </div>
           <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
             <strong className="text-4xl font-semibold tracking-tight">{value}</strong>
-            <Badge
-              variant="outline"
-              className="font-normal text-muted-foreground"
-              title="Weekly historical metrics are not recorded"
-            >
-              Trend unavailable
-            </Badge>
+            {subtitle && (
+              <Badge variant="outline" className={`font-normal ${badgeTone}`}>
+                {subtitle}
+              </Badge>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -97,9 +102,17 @@ function ProjectCard({ project, state, sample = false }) {
     : (project.repositoryIds || []).map(
         (id) => state.repositories.find((r) => r.id === id)?.name || "Unavailable repository",
       );
+  const projectRuns = sample ? [] : (state.runs || []).filter((r) => r.questId === project.id);
   const agents = sample
     ? project.sampleAgents
-    : state.runs.filter((r) => r.questId === project.id && r.state === "RUNNING").length;
+    : projectRuns.filter((r) => r.state === "RUNNING").length;
+  const latestRuns = sample ? [] : latestRunAttempts(projectRuns);
+  const waitingRun = latestRuns.find((r) => r.state === "WAITING_INPUT");
+  const failedRun = latestRuns.find((r) => ["FAILED", "INTERRUPTED"].includes(r.state));
+  const tasks = sample ? [] : (state.tasks || []).filter((t) => t.questId === project.id);
+  const doneTasks = tasks.filter((t) => t.state === "COMPLETED" || t.state === "PASSED").length;
+  const stageText = sample ? null : getStageLabel(state, project);
+  const statusLabel = projectStatus(project);
   const content = (
     <>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -108,7 +121,14 @@ function ProjectCard({ project, state, sample = false }) {
             <Folder className="size-4 text-muted-foreground" />
           </div>
           <div className="min-w-0">
-            <h3 className="break-words text-sm font-semibold">{project.title}</h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="break-words text-sm font-semibold">{project.title}</h3>
+              {project.sprint && (
+                <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400">
+                  {project.sprint}
+                </span>
+              )}
+            </div>
             <p className="mt-1 flex items-center gap-1.5 text-xs text-muted-foreground">
               <GitBranch className="size-3 shrink-0" />
               <span className="break-words">
@@ -120,18 +140,46 @@ function ProjectCard({ project, state, sample = false }) {
             </p>
           </div>
         </div>
-        <Badge
-          variant="outline"
-          className={
-            project.state === "PRS_CREATED"
-              ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
-              : "text-muted-foreground"
-          }
-        >
-          {projectStatus(project)}
-        </Badge>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {waitingRun && (
+            <Badge
+              variant="outline"
+              className="border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-300"
+            >
+              Awaiting Input
+            </Badge>
+          )}
+          {!waitingRun && failedRun && (
+            <Badge
+              variant="outline"
+              className="border-red-500/40 bg-red-500/10 text-[11px] text-red-300"
+            >
+              Needs Attention
+            </Badge>
+          )}
+          <Badge
+            variant="outline"
+            className={
+              project.state === "PRS_CREATED"
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                : "text-muted-foreground"
+            }
+          >
+            {project.state === "PRS_CREATED" ? `${statusLabel} · PRs Created` : statusLabel}
+          </Badge>
+        </div>
       </div>
-      <div className="mt-5 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-muted-foreground">
+      <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-muted-foreground">
+        {stageText && (
+          <span className="font-medium text-zinc-300">
+            Stage: {project.state === "PRS_CREATED" ? "PRs Created (Awaiting Merge)" : stageText}
+          </span>
+        )}
+        {tasks.length > 0 && (
+          <span>
+            Tasks: <strong className="text-zinc-300">{doneTasks}/{tasks.length}</strong>
+          </span>
+        )}
         <span className="flex items-center gap-1.5">
           <Bot className="size-3.5" />
           {agents} active agents
@@ -182,6 +230,74 @@ export function Overview({ state, actions }) {
   const events = [...state.events]
     .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0))
     .slice(0, 6);
+  const completedProjectsCount = (state.quests || []).filter((q) => q.state === "PRS_CREATED").length;
+  const allLatestRuns = latestRunAttempts(state.runs || []);
+  const attentionRuns = allLatestRuns.filter(
+    (r) =>
+      ["WAITING_INPUT", "FAILED", "INTERRUPTED"].includes(r.state) &&
+      (state.quests || []).some((q) => q.id === r.questId),
+  );
+  const actionableBlockers = [];
+  for (const q of state.quests || []) {
+    const roomBlockers = state.questRooms?.[q.id]?.blockers || [];
+    for (const b of roomBlockers) {
+      actionableBlockers.push({
+        id: `${q.id}-${b.title}`,
+        questTitle: q.title,
+        title: b.title,
+        detail: b.detail,
+        href: b.href || `#quest/${q.id}/room`,
+        cta: "Resolve in Room",
+        tone: "amber",
+      });
+    }
+    if (roomBlockers.length === 0) {
+      const qRuns = allLatestRuns.filter((r) => r.questId === q.id);
+      const waiting = qRuns.find((r) => r.state === "WAITING_INPUT");
+      const failed = qRuns.find((r) => ["FAILED", "INTERRUPTED"].includes(r.state));
+      if (waiting) {
+        actionableBlockers.push({
+          id: `${q.id}-waiting-${waiting.id}`,
+          questTitle: q.title,
+          title: "Agent waiting for your answer",
+          detail: String(waiting.summary || "").replace(/^\s*DEVQUEST_WAITING_INPUT\b[ \t]*(?:\r?\n)?/, "").slice(0, 140) || "Open the Agent Room to reply.",
+          href: `#quest/${q.id}/room`,
+          cta: "Answer Agent",
+          tone: "amber",
+        });
+      } else if (failed) {
+        actionableBlockers.push({
+          id: `${q.id}-failed-${failed.id}`,
+          questTitle: q.title,
+          title: `Agent session ${failed.state.toLowerCase()}`,
+          detail: String(failed.error || failed.summary || "Inspect logs in the Agent Room before retrying.").slice(0, 140),
+          href: `#quest/${q.id}/room`,
+          cta: "Inspect Error",
+          tone: "red",
+        });
+      } else if (q.state === "TRD_DRAFT") {
+        actionableBlockers.push({
+          id: `${q.id}-trd-gate`,
+          questTitle: q.title,
+          title: "TRD awaiting human approval",
+          detail: "Review and approve the Technical Requirements Document to unlock planning.",
+          href: `#quest/${q.id}/documents/trd`,
+          cta: "Review TRD",
+          tone: "emerald",
+        });
+      } else if (q.state === "PLAN_DRAFT") {
+        actionableBlockers.push({
+          id: `${q.id}-plan-gate`,
+          questTitle: q.title,
+          title: "Implementation plan awaiting approval",
+          detail: "Review task breakdown and dependencies before Jira sync or execution.",
+          href: `#quest/${q.id}/documents/plan`,
+          cta: "Review Plan",
+          tone: "emerald",
+        });
+      }
+    }
+  }
   return (
     <div className="dq-dashboard space-y-7">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -195,14 +311,6 @@ export function Overview({ state, actions }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
-          <Button
-            variant="outline"
-            onClick={() => launchOnboarding(0)}
-            className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200"
-          >
-            <Box />
-            How DevQuest Works · 3D Tour
-          </Button>
           <Button onClick={actions.newProject}>
             <Plus />
             New Project
@@ -210,15 +318,94 @@ export function Overview({ state, actions }) {
         </div>
       </div>
       <section className="grid gap-4 sm:grid-cols-3" aria-label="Workspace metrics">
-        <StatCard label="Active Projects" value={data.active} icon={Folder} href="#quests" />
-        <StatCard label="Running Agents" value={data.running} icon={Bot} href="#agents" />
+        <StatCard
+          label="Active Projects"
+          value={data.active}
+          subtitle={
+            completedProjectsCount > 0
+              ? `${completedProjectsCount} PRs created`
+              : data.active > 0
+                ? `${data.active} in flight`
+                : "No projects yet"
+          }
+          tone={data.active > 0 ? "emerald" : "neutral"}
+          icon={Folder}
+          href="#quests"
+        />
+        <StatCard
+          label="Running Agents"
+          value={data.running}
+          subtitle={
+            attentionRuns.length > 0
+              ? `${attentionRuns.length} need attention`
+              : data.running > 0
+                ? "Active execution"
+                : "Idle · ready"
+          }
+          tone={attentionRuns.length > 0 ? "warning" : data.running > 0 ? "emerald" : "neutral"}
+          icon={Bot}
+          href="#agents"
+        />
         <StatCard
           label="Repositories"
           value={data.repositories}
+          subtitle={data.repositories > 0 ? "Registered locally" : "Add a Git repo"}
           icon={GitFork}
           href="#repositories"
         />
       </section>
+      {actionableBlockers.length > 0 && (
+        <Card className="border-amber-500/35 bg-amber-500/5">
+          <CardHeader className="border-b border-amber-500/20 px-5 py-3.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2 text-sm font-semibold text-amber-200">
+                <AlertTriangle className="size-4 text-amber-400" />
+                Actionable Blockers &amp; Pending Gates
+              </CardTitle>
+              <Badge
+                variant="outline"
+                className="border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-300"
+              >
+                {actionableBlockers.length} item{actionableBlockers.length === 1 ? "" : "s"}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="divide-y divide-zinc-800/80 p-0">
+            {actionableBlockers.slice(0, 4).map((item) => (
+              <div
+                key={item.id}
+                className="flex flex-wrap items-center justify-between gap-3 px-5 py-3.5 text-xs"
+              >
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-semibold text-zinc-100">{item.questTitle}</span>
+                    <span className="text-zinc-500">·</span>
+                    <span
+                      className={
+                        item.tone === "red"
+                          ? "font-medium text-red-300"
+                          : item.tone === "emerald"
+                            ? "font-medium text-emerald-300"
+                            : "font-medium text-amber-300"
+                      }
+                    >
+                      {item.title}
+                    </span>
+                  </div>
+                  <p className="truncate text-zinc-400">{item.detail}</p>
+                </div>
+                <a
+                  href={item.href}
+                  className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 text-xs font-semibold text-amber-200 transition-colors hover:bg-amber-500/25"
+                >
+                  {item.cta}
+                  <ArrowRight className="size-3.5" />
+                </a>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
       <Card className="border-emerald-500/25 bg-card/90">
         <CardContent className="flex flex-col justify-between gap-4 p-5 sm:flex-row sm:items-center sm:p-6">
           <div className="space-y-2">
@@ -230,7 +417,7 @@ export function Overview({ state, actions }) {
                 Interactive 3D Onboarding
               </Badge>
               <span className="text-xs text-muted-foreground">
-                5-Stage Gated AI Engineering Pipeline
+                5 Workflow Stages · 6 Physical Engineering Stations
               </span>
             </div>
             <h2 className="text-base font-semibold tracking-tight">
@@ -372,12 +559,11 @@ export function Overview({ state, actions }) {
                         <p className="break-words text-sm leading-5">{event.message}</p>
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                           <time dateTime={event.createdAt}>{date(event.createdAt)}</time>
-                          <span
-                            className="rounded border border-border px-1.5 py-0.5 font-mono text-[10px]"
-                            title="Activity events do not include verified code-diff metrics"
-                          >
-                            diff n/a
-                          </span>
+                          {event.questId && state.quests.find((q) => q.id === event.questId) && (
+                            <span className="rounded border border-border px-1.5 py-0.5 text-[10px]">
+                              {state.quests.find((q) => q.id === event.questId).title}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </li>
@@ -396,7 +582,6 @@ export function Overview({ state, actions }) {
             </CardHeader>
             <CardContent className="space-y-1 px-3 pb-3">
               {[
-                [Box, "3D Workflow Guide", () => launchOnboarding(0)],
                 [FolderInput, "Import Repository", actions.addRepository],
                 [Bot, "Deploy New Agent", () => go("#agents")],
                 [Link, "Link Jira Board", actions.jiraSettings],
@@ -463,16 +648,6 @@ function Header({ state, actions = {} }) {
     <div className="dq-header flex items-center gap-2">
       <Button
         variant="outline"
-        size="sm"
-        className="h-9 gap-1.5 border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200"
-        onClick={() => openOnboarding3D({ state, actions })}
-        aria-label="Open 3D Workflow Guide"
-      >
-        <Box className="size-3.5" />
-        <span className="hidden md:inline">3D Tour</span>
-      </Button>
-      <Button
-        variant="outline"
         className="h-9 gap-2 border-border bg-background text-muted-foreground sm:w-56 sm:justify-start"
         onClick={() => setSearchOpen(true)}
         aria-label="Search workspace"
@@ -508,10 +683,6 @@ function Header({ state, actions = {} }) {
         <DropdownMenuContent align="end" className="dq-popup w-52">
           <DropdownMenuLabel>Local workspace</DropdownMenuLabel>
           <DropdownMenuSeparator />
-          <DropdownMenuItem onSelect={() => openOnboarding3D({ state, actions })}>
-            <Box className="mr-2 size-4 text-emerald-400" />
-            3D Workflow Guide
-          </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => go("#settings")}>
             <Settings className="mr-2 size-4" />
             Settings & integrations

@@ -588,7 +588,7 @@ function OverviewTab({ state, quest, actions }) {
               <div className="space-y-1">
                 <h3 className="text-sm font-medium text-zinc-100">
                   {quest.state === "PRS_CREATED"
-                    ? "All pull requests and configured handoffs are complete"
+                    ? "Pull requests created — awaiting external review and merge"
                     : quest.state === "BRAINSTORM_COMPLETED"
                       ? "Technical specification saved — analyze repository impact next"
                       : active
@@ -599,7 +599,7 @@ function OverviewTab({ state, quest, actions }) {
                 </h3>
                 <p className="text-xs leading-relaxed text-zinc-400">
                   {quest.state === "PRS_CREATED"
-                    ? "Inspect pull request links and QA verification records in the Work tab."
+                    ? "DevQuest created pull requests for the reviewed branches. External human code review and merge remain required on your Git host."
                     : active
                       ? "Open the Agent Room to inspect live streaming output or answer pending agent questions."
                       : "Trigger the immediate workflow action below or review saved design artifacts before proceeding."}
@@ -748,7 +748,12 @@ function OverviewTab({ state, quest, actions }) {
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="truncate text-xs font-semibold text-zinc-100">{repo.name}</p>
-                      <p className="truncate font-mono text-[11px] text-zinc-500">{repo.path}</p>
+                      <p
+                        className="truncate font-mono text-[11px] text-zinc-500"
+                        title={repo.path}
+                      >
+                        Local repo · {String(repo.path || "").split(/[\\/]/).filter(Boolean).pop() || repo.name}
+                      </p>
                     </div>
                     <StatusPill status={repo.status} />
                   </div>
@@ -948,6 +953,7 @@ function DocumentsTab({ state, quest, focusDocument }) {
   const [selectedKey, setSelectedKey] = useState(initialKey);
   const [viewMode, setViewMode] = useState("viewer");
   const [copied, setCopied] = useState(false);
+  const [showLocalPath, setShowLocalPath] = useState(false);
 
   useEffect(() => {
     if (focusDocument && docItems.some((d) => d.key === focusDocument)) {
@@ -1056,7 +1062,26 @@ function DocumentsTab({ state, quest, focusDocument }) {
                 )}
               </div>
               {activeDoc?.file && (
-                <p className="truncate font-mono text-[11px] text-zinc-500">{activeDoc.file}</p>
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-400">
+                  <span className="font-mono text-zinc-400">
+                    Local artifact:{" "}
+                    <strong className="text-zinc-300">
+                      {String(activeDoc.file).split(/[\\/]/).filter(Boolean).pop() || activeEntry.fileName}
+                    </strong>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowLocalPath((v) => !v)}
+                    className="rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                  >
+                    {showLocalPath ? "Hide full path" : "Show full path"}
+                  </button>
+                  {showLocalPath && (
+                    <code className="break-all rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+                      {activeDoc.file}
+                    </code>
+                  )}
+                </div>
               )}
             </div>
 
@@ -1240,14 +1265,36 @@ function WorkTab({ state, quest }) {
   const runs = (state.runs || []).filter((r) => r.questId === id);
   const qaCases = (state.qaCases || []).filter((c) => c.questId === id);
 
+  const [showAllLanes, setShowAllLanes] = useState(false);
+  const [expandedJiraTaskIds, setExpandedJiraTaskIds] = useState({});
+  const [expandedWorkPathIds, setExpandedWorkPathIds] = useState({});
+
   const classifyTask = (task) => {
     if (task.state === "COMPLETED" || task.state === "PASSED") return "done";
     if (
-      ["AWAITING_TEST", "TEST_FAILED", "FAILED", "NEEDS_HUMAN_ATTENTION"].includes(task.state)
+      [
+        "AWAITING_TEST",
+        "TEST_FAILED",
+        "FAILED",
+        "NEEDS_HUMAN_ATTENTION",
+        "REVIEW_PENDING",
+        "IN_REVIEW",
+        "VERIFYING",
+      ].includes(task.state)
     ) {
       return "review";
     }
-    if (["PREPARING", "RUNNING", "WAITING_INPUT", "PAUSED", "INTERRUPTED"].includes(task.state)) {
+    if (
+      [
+        "PREPARING",
+        "RUNNING",
+        "EXECUTING",
+        "IN_PROGRESS",
+        "WAITING_INPUT",
+        "PAUSED",
+        "INTERRUPTED",
+      ].includes(task.state)
+    ) {
       return "progress";
     }
     return "queue";
@@ -1267,6 +1314,8 @@ function WorkTab({ state, quest }) {
     },
     { key: "done", title: "Done", items: tasks.filter((t) => classifyTask(t) === "done") },
   ];
+
+  const allCompleted = tasks.length > 0 && columns[3].items.length === tasks.length;
 
   const getTaskTestPill = (task) => {
     if (task.validation?.passed === true || task.state === "COMPLETED") {
@@ -1293,180 +1342,301 @@ function WorkTab({ state, quest }) {
     );
   };
 
+  const renderTaskCard = (task) => {
+    const repoId = task.repoId || task.repositoryId;
+    const taskKey = task.key || task.taskId;
+    const repo = (state.repositories || []).find((r) => r.id === repoId);
+    const work = works.find((w) => w.repoId === repoId);
+    const taskRun = runs.filter((r) => r.taskId === task.id).at(-1);
+    const agentRoleLabel = taskRun ? roleForRun(taskRun).label : "Developer";
+    const branchName =
+      task.workspace?.branch ||
+      work?.branch ||
+      repo?.baseBranch ||
+      repo?.defaultBranch ||
+      "development";
+    const jiraIssues = (task.jira?.issues || (task.jira ? [task.jira] : [])).filter(
+      (i) => i && i.key,
+    );
+    const jiraExpanded = Boolean(expandedJiraTaskIds[task.id]);
+    const visibleJira = jiraExpanded ? jiraIssues : jiraIssues.slice(0, 2);
+    const hiddenJiraCount = Math.max(0, jiraIssues.length - 2);
+
+    return (
+      <article
+        key={task.id}
+        className="flex min-w-0 flex-col justify-between space-y-2.5 rounded-lg border border-zinc-800 bg-zinc-950/80 p-3.5"
+      >
+        <div className="min-w-0 space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-1.5">
+            <span className="font-mono text-[11px] font-semibold text-emerald-400">
+              {taskKey}
+            </span>
+            <StatusPill status={task.state} />
+          </div>
+
+          <h4 className="text-xs font-semibold leading-snug text-zinc-100">{task.title}</h4>
+
+          {jiraIssues.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {visibleJira.map((issue) => {
+                const href = safeUrl(issue.url);
+                return href !== "#" ? (
+                  <a
+                    key={issue.key}
+                    href={href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 hover:bg-emerald-500/20"
+                  >
+                    {issue.key}
+                    <ExternalLink className="size-2.5" />
+                  </a>
+                ) : (
+                  <span
+                    key={issue.key}
+                    className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300"
+                  >
+                    {issue.key}
+                  </span>
+                );
+              })}
+              {hiddenJiraCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setExpandedJiraTaskIds((prev) => ({
+                      ...prev,
+                      [task.id]: !prev[task.id],
+                    }))
+                  }
+                  className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400 hover:border-zinc-600 hover:text-zinc-200"
+                >
+                  {jiraExpanded ? "Show less" : `+${hiddenJiraCount} more`}
+                </button>
+              )}
+            </div>
+          )}
+
+          {task.error && (
+            <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
+              <p>{task.error.split("\n")[0]}</p>
+              <button
+                type="button"
+                data-action="task-attention"
+                data-task-id={task.id}
+                className="mt-2 underline"
+              >
+                Review blocker
+              </button>
+            </div>
+          )}
+
+          {/* Agent Role + Git Branch + Test Status Pills */}
+          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+            <span className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300">
+              <Bot className="size-3 text-emerald-400" />
+              {agentRoleLabel}
+            </span>
+            <span className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+              <GitBranch className="size-3 text-sky-400" />
+              {repo?.name || repoId}:{branchName}
+            </span>
+            {getTaskTestPill(task)}
+          </div>
+
+          {task.dependencies?.length > 0 && (
+            <p className="text-[11px] text-zinc-500">
+              Depends on:{" "}
+              {task.dependencies
+                .map((depId) => {
+                  const dep = state.tasks.find((t) => t.id === depId);
+                  return dep?.key || dep?.taskId || depId;
+                })
+                .join(", ")}
+            </p>
+          )}
+
+          {task.validation?.summary && (
+            <pre className="max-h-20 overflow-auto rounded border border-zinc-800/80 bg-zinc-900/90 p-2 font-mono text-[10px] text-zinc-300">
+              {task.validation.summary}
+            </pre>
+          )}
+        </div>
+
+        {/* Task Controls */}
+        <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-800/70 pt-2">
+          {quest.workflowVersion !== 2 && (
+            <select
+              aria-label={`Runtime for ${taskKey}`}
+              data-task-runtime={task.id}
+              className="h-8 rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] leading-4 text-zinc-200"
+            >
+              {Object.entries(state.runtimes || {}).map(([key, rt]) => (
+                <option key={key} value={key} disabled={!rt.available}>
+                  {key === "codex" ? "Codex" : "Claude Code"}
+                </option>
+              ))}
+            </select>
+          )}
+          {task.state === "PUBLISHED" && (
+            <button
+              type="button"
+              data-action="START_TASK"
+              data-quest-id={id}
+              data-task-id={task.id}
+              className="rounded bg-emerald-400 px-2.5 py-1 text-[11px] font-semibold text-zinc-950 hover:bg-emerald-300"
+            >
+              Start
+            </button>
+          )}
+          {["AWAITING_TEST", "TEST_FAILED", "COMPLETED"].includes(task.state) && (
+            <button
+              type="button"
+              data-action="RUN_TEST"
+              data-quest-id={id}
+              data-task-id={task.id}
+              className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:bg-zinc-800"
+            >
+              Run Tests
+            </button>
+          )}
+          {quest.workflowVersion !== 2 &&
+            ["COMPLETED", "TEST_FAILED"].includes(task.state) && (
+              <button
+                type="button"
+                data-action="REOPEN_TASK"
+                data-quest-id={id}
+                data-task-id={task.id}
+                className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:bg-zinc-800"
+              >
+                Reopen
+              </button>
+            )}
+          {quest.workflowVersion === 2 &&
+            ["FAILED", "INTERRUPTED", "CANCELLED", "NEEDS_HUMAN_ATTENTION"].includes(
+              task.state,
+            ) &&
+            !task.integratedCommit && (
+              <button
+                type="button"
+                data-action="RETRY_TASK"
+                data-quest-id={id}
+                data-task-id={task.id}
+                className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:bg-zinc-800"
+              >
+                Retry Task
+              </button>
+            )}
+          {quest.workflowVersion === 2 &&
+            ["PREPARING", "RUNNING", "WAITING_INPUT"].includes(task.state) && (
+              <button
+                type="button"
+                data-action="CANCEL_TASK"
+                data-quest-id={id}
+                data-task-id={task.id}
+                className="rounded border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[11px] font-medium text-red-300 hover:bg-red-500/20"
+              >
+                Cancel
+              </button>
+            )}
+        </div>
+      </article>
+    );
+  };
+
   return (
     <div className="space-y-6">
-      {/* 4-Column Task Pipeline View */}
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {columns.map((col) => (
-          <Card key={col.key} className="flex flex-col border-zinc-800 bg-zinc-900">
-            <CardHeader className="border-b border-zinc-800/80 px-4 py-3">
-              <div className="flex items-center justify-between">
-                <CardTitle className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
-                  {col.title}
-                </CardTitle>
-                <Badge variant="outline" className="border-zinc-700 text-[11px] text-zinc-400">
-                  {col.items.length}
-                </Badge>
-              </div>
-            </CardHeader>
-            <CardContent className="flex-1 space-y-3 p-3">
-              {col.items.length > 0 ? (
-                col.items.map((task) => {
-                  const repo = (state.repositories || []).find((r) => r.id === task.repoId);
-                  const work = works.find((w) => w.repoId === task.repoId);
-                  const taskRun = runs.filter((r) => r.taskId === task.id).at(-1);
-                  const agentRoleLabel = taskRun ? roleForRun(taskRun).label : "Developer";
-                  const branchName =
-                    task.workspace?.branch ||
-                    work?.branch ||
-                    repo?.baseBranch ||
-                    repo?.defaultBranch ||
-                    "development";
-
-                  return (
-                    <article
-                      key={task.id}
-                      className="space-y-2.5 rounded-lg border border-zinc-800 bg-zinc-950/80 p-3.5"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-1.5">
-                        <span className="font-mono text-[11px] font-semibold text-emerald-400">
-                          {task.key}
-                        </span>
-                        {task.jira?.key && (
-                          <span className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
-                            {task.jira.key}
-                          </span>
-                        )}
-                        <StatusPill status={task.state} />
-                      </div>
-
-                      <h4 className="text-xs font-semibold leading-snug text-zinc-100">
-                        {task.title}
-                      </h4>
-
-                      {task.error && <div className="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">
-                        <p>{task.error.split("\n")[0]}</p>
-                        <button type="button" data-action="task-attention" data-task-id={task.id}
-                          className="mt-2 underline">Review blocker</button>
-                      </div>}
-
-                      {/* Agent Role + Git Branch + Test Status Pills */}
-                      <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-                        <span className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium text-zinc-300">
-                          <Bot className="size-3 text-emerald-400" />
-                          {agentRoleLabel}
-                        </span>
-                        <span className="inline-flex items-center gap-1 rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
-                          <GitBranch className="size-3 text-sky-400" />
-                          {repo?.name || task.repoId}:{branchName}
-                        </span>
-                        {getTaskTestPill(task)}
-                      </div>
-
-                      {task.dependencies?.length > 0 && (
-                        <p className="text-[11px] text-zinc-500">
-                          Depends on:{" "}
-                          {task.dependencies
-                            .map((depId) => state.tasks.find((t) => t.id === depId)?.key || depId)
-                            .join(", ")}
-                        </p>
-                      )}
-
-                      {task.validation?.summary && (
-                        <pre className="max-h-20 overflow-auto rounded border border-zinc-800/80 bg-zinc-900/90 p-2 font-mono text-[10px] text-zinc-300">
-                          {task.validation.summary}
-                        </pre>
-                      )}
-
-                      {/* Task Controls */}
-                      <div className="flex flex-wrap items-center gap-1.5 border-t border-zinc-800/70 pt-2">
-                        {quest.workflowVersion !== 2 && (
-                          <select
-                            aria-label={`Runtime for ${task.key}`}
-                            data-task-runtime={task.id}
-                            className="h-8 rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] leading-4 text-zinc-200"
-                          >
-                            {Object.entries(state.runtimes || {}).map(([key, rt]) => (
-                              <option key={key} value={key} disabled={!rt.available}>
-                                {key === "codex" ? "Codex" : "Claude Code"}
-                              </option>
-                            ))}
-                          </select>
-                        )}
-                        {task.state === "PUBLISHED" && (
-                          <button
-                            type="button"
-                            data-action="START_TASK"
-                            data-quest-id={id}
-                            data-task-id={task.id}
-                            className="rounded bg-emerald-400 px-2.5 py-1 text-[11px] font-semibold text-zinc-950 hover:bg-emerald-300"
-                          >
-                            Start
-                          </button>
-                        )}
-                        {["AWAITING_TEST", "TEST_FAILED", "COMPLETED"].includes(task.state) && (
-                          <button
-                            type="button"
-                            data-action="RUN_TEST"
-                            data-quest-id={id}
-                            data-task-id={task.id}
-                            className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:bg-zinc-800"
-                          >
-                            Run Tests
-                          </button>
-                        )}
-                        {quest.workflowVersion !== 2 &&
-                          ["COMPLETED", "TEST_FAILED"].includes(task.state) && (
-                            <button
-                              type="button"
-                              data-action="REOPEN_TASK"
-                              data-quest-id={id}
-                              data-task-id={task.id}
-                              className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:bg-zinc-800"
-                            >
-                              Reopen
-                            </button>
-                          )}
-                        {quest.workflowVersion === 2 &&
-                          ["FAILED", "INTERRUPTED", "CANCELLED", "NEEDS_HUMAN_ATTENTION"].includes(
-                            task.state,
-                          ) &&
-                          !task.integratedCommit && (
-                            <button
-                              type="button"
-                              data-action="RETRY_TASK"
-                              data-quest-id={id}
-                              data-task-id={task.id}
-                              className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:bg-zinc-800"
-                            >
-                              Retry Task
-                            </button>
-                          )}
-                        {quest.workflowVersion === 2 &&
-                          ["PREPARING", "RUNNING", "WAITING_INPUT"].includes(task.state) && (
-                            <button
-                              type="button"
-                              data-action="CANCEL_TASK"
-                              data-quest-id={id}
-                              data-task-id={task.id}
-                              className="rounded border border-red-500/40 bg-red-500/10 px-2.5 py-1 text-[11px] font-medium text-red-300 hover:bg-red-500/20"
-                            >
-                              Cancel
-                            </button>
-                          )}
-                      </div>
-                    </article>
-                  );
-                })
-              ) : (
-                <div className="flex min-h-[140px] items-center justify-center rounded-lg border border-dashed border-zinc-800/80 p-4 text-center text-xs text-zinc-500">
-                  No tasks in {col.title.toLowerCase()}
+      {/* Adaptive Completed-Task View vs Active 4-Column Task Pipeline View */}
+      {allCompleted && !showAllLanes ? (
+        <Card className="border-emerald-500/30 bg-zinc-900">
+          <CardHeader className="border-b border-zinc-800/80 px-5 py-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span className="flex size-6 items-center justify-center rounded-md bg-emerald-500/15 text-emerald-400">
+                  <CheckCircle2 className="size-4" />
+                </span>
+                <div>
+                  <CardTitle className="text-sm font-semibold text-zinc-100">
+                    All {tasks.length} Execution Tasks Completed
+                  </CardTitle>
+                  <p className="text-xs text-zinc-400">
+                    Empty pipeline lanes collapsed to maximize space for completed task evidence, validation logs, and Jira links.
+                  </p>
                 </div>
-              )}
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                  {columns.map((col) => (
+                    <span
+                      key={col.key}
+                      className={`rounded-md border px-2 py-0.5 font-mono ${
+                        col.key === "done"
+                          ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                          : "border-zinc-800 bg-zinc-950 text-zinc-500"
+                      }`}
+                    >
+                      {col.title}: {col.items.length}
+                    </span>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAllLanes(true)}
+                  className="rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1 text-xs font-medium text-zinc-300 hover:border-zinc-600 hover:bg-zinc-800"
+                >
+                  Show 4-column board
+                </button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="p-5">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {columns[3].items.map(renderTaskCard)}
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="space-y-3">
+          {allCompleted && showAllLanes && (
+            <div className="flex items-center justify-between rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-2.5 text-xs text-emerald-200">
+              <span>All {tasks.length} tasks are in the Done lane.</span>
+              <button
+                type="button"
+                onClick={() => setShowAllLanes(false)}
+                className="rounded border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 font-medium text-emerald-200 hover:bg-emerald-500/25"
+              >
+                Use adaptive completed view
+              </button>
+            </div>
+          )}
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            {columns.map((col) => (
+              <Card key={col.key} className="flex flex-col border-zinc-800 bg-zinc-900">
+                <CardHeader className="border-b border-zinc-800/80 px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                      {col.title}
+                    </CardTitle>
+                    <Badge variant="outline" className="border-zinc-700 text-[11px] text-zinc-400">
+                      {col.items.length}
+                    </Badge>
+                  </div>
+                </CardHeader>
+                <CardContent className="flex-1 space-y-3 p-3">
+                  {col.items.length > 0 ? (
+                    col.items.map(renderTaskCard)
+                  ) : (
+                    <div className="flex min-h-[140px] items-center justify-center rounded-lg border border-dashed border-zinc-800/80 p-4 text-center text-xs text-zinc-500">
+                      No tasks in {col.title.toLowerCase()}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Repository Integration, Code Review & PR Handoff Section */}
       <div className="grid gap-5 lg:grid-cols-2">
@@ -1482,6 +1652,9 @@ function WorkTab({ state, quest }) {
               works.map((work) => {
                 const repo = (state.repositories || []).find((r) => r.id === work.repoId);
                 const publication = (state.operations || []).find(o=>o.id===`pr:${work.id}`);
+                const repairing = (state.operations || []).some(o=>o.id===`pr-conflict:${work.id}` && o.state==="RUNNING");
+                const recoveryHead = work.targetRecovery?.state !== "RESOLVED" && work.targetRecovery?.head || work.productionReview?.reviewedCommit || work.validation?.head || work.humanApprovedCommit;
+                const publishedRecovery = works.some(w=>w.targetRecovery) && Boolean(work.pr);
                 const publishing = publication?.state === "RUNNING";
                 const savedPublicationError = !work.pr && publication?.state !== "RUNNING" && publication?.error;
                 const publicationError = savedPublicationError && /(?:@|\/\/)bitbucket\.org[:/]/i.test(repo?.remote || "") &&
@@ -1504,21 +1677,60 @@ function WorkTab({ state, quest }) {
                           {work.branch} → {work.prTarget || "development"}
                         </p>
                       </div>
-                      <StatusPill status={work.state} />
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {work.pr && (
+                          <Badge
+                            variant="outline"
+                            className="border-amber-500/30 bg-amber-500/10 text-[10px] text-amber-300"
+                          >
+                            Awaiting External Review &amp; Merge
+                          </Badge>
+                        )}
+                        <StatusPill status={work.state} />
+                      </div>
                     </div>
-                    <p className="truncate font-mono text-[11px] text-zinc-500">{work.path}</p>
+                    {work.path && (
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
+                        <span className="font-mono" title={work.path}>
+                          Worktree: {String(work.path).split(/[\\/]/).filter(Boolean).pop() || work.id}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedWorkPathIds((prev) => ({
+                              ...prev,
+                              [work.id]: !prev[work.id],
+                            }))
+                          }
+                          className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-400 hover:text-zinc-200"
+                        >
+                          {expandedWorkPathIds[work.id] ? "Hide path" : "Show path"}
+                        </button>
+                        {expandedWorkPathIds[work.id] && (
+                          <code className="break-all rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+                            {work.path}
+                          </code>
+                        )}
+                      </div>
+                    )}
                     {(work.error || publicationError) && (
                       <p className="rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300">
                         {work.error || publicationError}
                       </p>
                     )}
+                    {work.prConflictCheck?.conflict === false && !work.targetRecovery && <p className="text-xs text-zinc-400">No merge conflict found against the checked target. No clean branch or agent was created.</p>}
+                    {work.targetRecovery && <p className="text-xs text-emerald-300">
+                      Clean staging snapshot: <code>{work.targetRecovery.branch}</code> · {work.targetRecovery.head.slice(0,12)} (local, not pushed).
+                      {work.targetRecovery.state === "RESOLVED" ? " Target repair validated; fresh review and approval required." : " Target conflict repair is preserved on the original epic branch."}
+                      {work.targetRecovery.previousPr && <> <a className="underline" href={safeUrl(work.targetRecovery.previousPr.url)} target="_blank" rel="noreferrer">Existing PR</a></>}
+                    </p>}
                     {work.review?.summary && (
                       <pre className="max-h-32 overflow-auto rounded border border-zinc-800 bg-zinc-900 p-2.5 font-mono text-[11px] text-zinc-300">
                         {work.review.summary}
                       </pre>
                     )}
                     <div className="flex flex-wrap items-center gap-2 pt-1">
-                      {!work.pr && (
+                      {(!work.pr || publishedRecovery) && (
                         <button
                           type="button"
                           data-action="REVIEW_REPOSITORY"
@@ -1541,6 +1753,12 @@ function WorkTab({ state, quest }) {
                           Approve Review
                         </button>
                       )}
+                      {recoveryHead && work.targetRecovery?.state !== "RESOLVED" && <button type="button"
+                        data-action="pr-conflict-dialog" data-quest-id={id} data-work-id={work.id}
+                        data-expected-head={recoveryHead} disabled={publishing || repairing}
+                        className="rounded-lg border border-amber-500/40 px-3 py-1.5 text-xs text-amber-300 hover:bg-amber-500/10">
+                        {repairing ? "Preparing conflict repair…" : "Resolve PR conflicts"}
+                      </button>}
                       {work.state === "READY_FOR_PR" && (
                         <button
                           type="button"
@@ -1751,6 +1969,37 @@ function WorkTab({ state, quest }) {
 /* ==========================================================================
    TAB 4: ROOM (Interactive Agent Room Layout: Center Feed + Bottom Input Bar)
    ========================================================================== */
+function parseRoomEntryBody(raw = "") {
+  const cleaned = String(raw || "").replace(/^\s*DEVQUEST_WAITING_INPUT\b[ \t]*(?:\r?\n)?/, "");
+  const lines = cleaned.split(/\r?\n/);
+  const proseLines = [];
+  const rawLines = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]")) ||
+      /^\s*at\s+\S+\s+\(/.test(line)
+    ) {
+      rawLines.push(line);
+    } else {
+      proseLines.push(line);
+    }
+  }
+  const summary = proseLines.join("\n").trim();
+  const rawJsonOrLog = rawLines.join("\n").trim();
+  if (!summary && rawJsonOrLog) {
+    return {
+      summary: "Structured runtime telemetry / JSON payload recorded for this turn.",
+      rawPayload: rawJsonOrLog,
+    };
+  }
+  return {
+    summary: summary || cleaned,
+    rawPayload: rawJsonOrLog,
+  };
+}
+
 function RoomTab({ state, quest, actions }) {
   const id = quest.id;
   const room = state.questRooms?.[id];
@@ -1786,6 +2035,8 @@ function RoomTab({ state, quest, actions }) {
   const [selectedRunToken, setSelectedRunToken] = useState(
     stoppedRuns[0] ? `${stoppedRuns[0].id}|${stoppedRuns[0].updatedAt || ""}` : "",
   );
+  const [expandedRawIds, setExpandedRawIds] = useState({});
+  const [roomFilter, setRoomFilter] = useState("all");
   const [requestId] = useState(
     () => `${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
@@ -1812,6 +2063,14 @@ function RoomTab({ state, quest, actions }) {
     }
   };
 
+  const attentionCount = timeline.filter((e) =>
+    ["WAITING_INPUT", "FAILED", "INTERRUPTED"].includes(e.state),
+  ).length;
+  const filteredTimeline =
+    roomFilter === "attention"
+      ? timeline.filter((e) => ["WAITING_INPUT", "FAILED", "INTERRUPTED"].includes(e.state))
+      : timeline;
+
   return (
     <div className="flex flex-col gap-4">
       {/* Main Center Feed: Live Execution Log & Timeline Stream */}
@@ -1824,7 +2083,33 @@ function RoomTab({ state, quest, actions }) {
                 Agent Room · Live Execution & Decision Stream
               </CardTitle>
             </div>
-            <div className="flex items-center gap-2 text-xs text-zinc-400">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400">
+              {attentionCount > 0 && (
+                <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-950 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setRoomFilter("all")}
+                    className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
+                      roomFilter === "all"
+                        ? "bg-zinc-800 text-zinc-100"
+                        : "text-zinc-400 hover:text-zinc-200"
+                    }`}
+                  >
+                    All ({timeline.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRoomFilter("attention")}
+                    className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
+                      roomFilter === "attention"
+                        ? "bg-amber-500/20 text-amber-300"
+                        : "text-amber-400/80 hover:text-amber-300"
+                    }`}
+                  >
+                    Needs Attention ({attentionCount})
+                  </button>
+                </div>
+              )}
               <span>{timeline.length} timeline entries</span>
               <span>·</span>
               <span>{runs.filter((r) => r.state === "RUNNING").length} running</span>
@@ -1832,23 +2117,32 @@ function RoomTab({ state, quest, actions }) {
           </div>
         </CardHeader>
 
-        <CardContent className="max-h-[520px] space-y-4 overflow-y-auto p-5">
+        <CardContent className="max-h-[560px] space-y-4 overflow-y-auto p-5">
           {/* Active Running Sessions Live Stream */}
           {runs
             .filter((r) => r.state === "RUNNING")
             .map((run) => {
               const role = roleForRun(run);
+              const runTask = (state.tasks || []).find((t) => t.id === run.taskId);
               return (
                 <div
                   key={run.id}
                   className="space-y-3 rounded-lg border border-emerald-500/40 bg-zinc-950 p-4"
                 >
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="size-2 animate-pulse rounded-full bg-emerald-400" />
                       <strong className="text-xs font-semibold text-emerald-300">
                         {role.label} · {run.runtime === "codex" ? "Codex" : "Claude Code"}
                       </strong>
+                      <span className="rounded border border-zinc-800 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+                        Run: {run.id}
+                      </span>
+                      {runTask && (
+                        <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
+                          Task: {runTask.key || runTask.taskId}
+                        </span>
+                      )}
                       <span className="text-xs text-zinc-400">
                         ({STAGE_NAMES[run.purpose] || run.purpose})
                       </span>
@@ -1892,22 +2186,45 @@ function RoomTab({ state, quest, actions }) {
               );
             })}
 
-          {/* Chronological Timeline Stream (Flat, Zero Nested Accordions) */}
-          {timeline.length > 0 ? (
+          {/* Chronological Timeline Stream grouped by AgentRun & workflow task */}
+          {filteredTimeline.length > 0 ? (
             <ol className="space-y-3">
-              {timeline.map((entry, idx) => {
+              {filteredTimeline.map((entry, idx) => {
+                const entryKey = entry.id || idx;
                 const isAgent = entry.kind === "agent";
                 const canReply =
                   isAgent && stoppedRuns.some((r) => r.id === entry.runId);
-                const entryRun = stoppedRuns.find(r=>r.id===entry.runId);
-                const entryTask = state.tasks.find(t=>t.id===entryRun?.taskId);
-                const retryLimit = Math.max(quest.execution?.limits?.retries || 0, entryTask?.manualRetryLimit || 0);
-                const needsRetryAllowance = canReply && entryRun.state !== "WAITING_INPUT" && entryTask &&
-                  !entryTask.integratedCommit && (entryTask.retries || 0) >= retryLimit && retryLimit < 10;
+                const entryRun = stoppedRuns.find((r) => r.id === entry.runId);
+                const anyRun = runs.find((r) => r.id === entry.runId);
+                const entryTask = (state.tasks || []).find(
+                  (t) => t.id === (entry.taskId || anyRun?.taskId || entryRun?.taskId),
+                );
+                const retryLimit = Math.max(
+                  quest.execution?.limits?.retries || 0,
+                  entryTask?.manualRetryLimit || 0,
+                );
+                const needsRetryAllowance =
+                  canReply &&
+                  entryRun.state !== "WAITING_INPUT" &&
+                  entryTask &&
+                  !entryTask.integratedCommit &&
+                  (entryTask.retries || 0) >= retryLimit &&
+                  retryLimit < 10;
+                const isWaiting = entry.state === "WAITING_INPUT";
+                const isFailed = entry.state === "FAILED" || Boolean(entry.error);
+                const { summary, rawPayload } = parseRoomEntryBody(entry.body);
+                const rawExpanded = Boolean(expandedRawIds[entryKey]);
+
+                const cardBorderClass = isWaiting
+                  ? "border-amber-500/50 bg-amber-500/5"
+                  : isFailed
+                    ? "border-red-500/50 bg-red-500/5"
+                    : "border-zinc-800 bg-zinc-950/80";
+
                 return (
                   <li
-                    key={entry.id || idx}
-                    className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-4"
+                    key={entryKey}
+                    className={`rounded-lg border p-4 ${cardBorderClass}`}
                   >
                     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/70 pb-2.5">
                       <div className="flex flex-wrap items-center gap-2">
@@ -1921,9 +2238,22 @@ function RoomTab({ state, quest, actions }) {
                           {isAgent ? <Bot className="size-3.5" /> : <MessageSquare className="size-3.5" />}
                           {isAgent ? entry.role : "Owner Note / Instruction"}
                         </span>
-                        <span className="font-mono text-xs text-zinc-400">
-                          {entry.stage || entry.kind}
+                        <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-300">
+                          {STAGE_NAMES[entry.stage] || entry.stage || entry.kind}
                         </span>
+                        {entryTask && (
+                          <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] text-emerald-300">
+                            Task: {entryTask.key || entryTask.taskId}
+                          </span>
+                        )}
+                        {(anyRun || entry.runId) && (
+                          <span className="rounded border border-zinc-800 bg-zinc-900 px-2 py-0.5 font-mono text-[10px] text-zinc-400">
+                            Run: {entry.runId}
+                            {anyRun?.actualModel || anyRun?.resolvedModel
+                              ? ` · ${anyRun.actualModel || anyRun.resolvedModel}`
+                              : ""}
+                          </span>
+                        )}
                         {entry.state && <StatusPill status={entry.state} />}
                       </div>
                       <div className="flex items-center gap-2">
@@ -1932,8 +2262,16 @@ function RoomTab({ state, quest, actions }) {
                             {formatTime(entry.createdAt)}
                           </time>
                         )}
-                        {needsRetryAllowance && <button type="button" data-action="retry-budget" data-task-id={entryTask.id}
-                          className="rounded border border-amber-500/40 bg-amber-500/10 px-2.5 py-0.5 text-[11px] text-amber-300">Allow one more retry</button>}
+                        {needsRetryAllowance && (
+                          <button
+                            type="button"
+                            data-action="retry-budget"
+                            data-task-id={entryTask.id}
+                            className="rounded border border-amber-500/40 bg-amber-500/10 px-2.5 py-0.5 text-[11px] text-amber-300"
+                          >
+                            Allow one more retry
+                          </button>
+                        )}
                         {canReply && (
                           <button
                             type="button"
@@ -1944,17 +2282,54 @@ function RoomTab({ state, quest, actions }) {
                                 setSelectedRunToken(`${run.id}|${run.updatedAt || ""}`);
                               }
                             }}
-                            className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20"
+                            className={`rounded border px-2.5 py-1 text-[11px] font-semibold transition-colors ${
+                              isWaiting
+                                ? "border-amber-400/60 bg-amber-400 text-zinc-950 hover:bg-amber-300"
+                                : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20"
+                            }`}
                           >
-                            {entry.state === "WAITING_INPUT" ? "Answer" : "Reply"}
+                            {isWaiting ? "Answer Agent" : "Reply"}
                           </button>
                         )}
                       </div>
                     </div>
 
-                    <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-zinc-200">
-                      {entry.body}
-                    </pre>
+                    {isWaiting && (
+                      <div className="mt-3 flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-200">
+                        <AlertTriangle className="size-3.5 shrink-0 text-amber-400" />
+                        <span>Waiting for human input — answer below to resume this stopped AgentRun.</span>
+                      </div>
+                    )}
+
+                    {/* Readable Summary First */}
+                    <div className="mt-3 space-y-2">
+                      <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-zinc-100">
+                        {summary}
+                      </p>
+
+                      {rawPayload && (
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedRawIds((prev) => ({
+                                ...prev,
+                                [entryKey]: !prev[entryKey],
+                              }))
+                            }
+                            className="inline-flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1 font-mono text-[11px] text-zinc-300 hover:border-zinc-600 hover:bg-zinc-800"
+                          >
+                            <Code2 className="size-3 text-emerald-400" />
+                            {rawExpanded ? "Hide Raw JSON / Telemetry" : "Show Raw JSON / Telemetry"}
+                          </button>
+                          {rawExpanded && (
+                            <pre className="mt-2 max-h-60 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed text-zinc-300">
+                              {rawPayload}
+                            </pre>
+                          )}
+                        </div>
+                      )}
+                    </div>
 
                     {entry.delivery && (
                       <div className="mt-2.5 flex flex-wrap items-center gap-2 rounded border border-zinc-800 bg-zinc-900/70 px-3 py-1.5 text-[11px] text-zinc-400">
@@ -1965,9 +2340,10 @@ function RoomTab({ state, quest, actions }) {
                       </div>
                     )}
                     {entry.error && (
-                      <p className="mt-2 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-300">
-                        {entry.error}
-                      </p>
+                      <div className="mt-2.5 flex items-start gap-2 rounded border border-red-500/40 bg-red-500/10 p-2.5 text-xs text-red-200">
+                        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-red-400" />
+                        <p className="break-words">{entry.error}</p>
+                      </div>
                     )}
                   </li>
                 );
@@ -2015,7 +2391,7 @@ function RoomTab({ state, quest, actions }) {
                     : "text-zinc-400 hover:text-zinc-200"
                 }`}
               >
-                Room Note (No Agent)
+                Room Note (Free · No Agent)
               </button>
               <button
                 type="button"
@@ -2027,7 +2403,7 @@ function RoomTab({ state, quest, actions }) {
                     : "text-zinc-400 hover:text-zinc-200"
                 }`}
               >
-                Direct Agent Instruction ({stoppedRuns.length})
+                Direct Agent Instruction ({stoppedRuns.length} · Paid Turn)
               </button>
             </div>
           </div>
@@ -2041,6 +2417,17 @@ function RoomTab({ state, quest, actions }) {
             >
               <input type="hidden" name="questId" value={id} />
               <input type="hidden" name="requestId" value={requestId} />
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                <span>
+                  <strong>Spawns a new paid agent turn:</strong> Resumes the selected stopped AgentRun via CLI within existing stage and permission guards.
+                </span>
+                <Badge
+                  variant="outline"
+                  className="border-amber-400/40 bg-amber-500/15 text-[10px] text-amber-200"
+                >
+                  Paid CLI Turn
+                </Badge>
+              </div>
               <div className="flex flex-wrap items-center gap-3">
                 <label className="text-xs font-medium text-zinc-300">Target Stopped Agent:</label>
                 <select
@@ -2052,9 +2439,11 @@ function RoomTab({ state, quest, actions }) {
                 >
                   {stoppedRuns.map((r) => {
                     const tokenVal = `${r.id}|${r.updatedAt || ""}`;
+                    const rTask = (state.tasks || []).find((t) => t.id === r.taskId);
                     return (
                       <option key={r.id} value={tokenVal}>
-                        {roleForRun(r).label} · {STAGE_NAMES[r.purpose] || r.purpose} · {r.state}
+                        {roleForRun(r).label} · {STAGE_NAMES[r.purpose] || r.purpose}
+                        {rTask ? ` (${rTask.key || rTask.taskId})` : ""} · {r.state}
                       </option>
                     );
                   })}
@@ -2071,7 +2460,7 @@ function RoomTab({ state, quest, actions }) {
                 className="w-full rounded-lg border border-zinc-700 bg-zinc-950 p-3 text-xs leading-relaxed text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
               />
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <label className="flex items-center gap-2 text-xs text-zinc-400">
+                <label className="flex items-center gap-2 text-xs text-zinc-300">
                   <input
                     type="checkbox"
                     name="confirmAgentRun"
@@ -2085,7 +2474,7 @@ function RoomTab({ state, quest, actions }) {
                   className="inline-flex h-9 items-center gap-2 rounded-lg bg-emerald-400 px-4 text-xs font-semibold text-zinc-950 hover:bg-emerald-300"
                 >
                   <Send className="size-3.5" />
-                  Send Note / Instruction to Agent
+                  Send Note / Instruction to Agent (Paid Turn)
                 </button>
               </div>
               <p className="form-error text-xs text-red-300" role="alert" />
@@ -2098,6 +2487,17 @@ function RoomTab({ state, quest, actions }) {
               className="space-y-3"
             >
               <input type="hidden" name="questId" value={id} />
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-950/80 px-3 py-2 text-xs text-zinc-300">
+                <span>
+                  <strong>Free room note (no agent spawned):</strong> Records engineering decisions or handoff notes without starting any CLI run.
+                </span>
+                <Badge
+                  variant="outline"
+                  className="border-zinc-700 bg-zinc-900 text-[10px] text-zinc-400"
+                >
+                  Free · No Agent
+                </Badge>
+              </div>
               <textarea
                 name="message"
                 required
@@ -2114,10 +2514,10 @@ function RoomTab({ state, quest, actions }) {
                 </span>
                 <button
                   type="submit"
-                  className="inline-flex h-9 items-center gap-2 rounded-lg bg-emerald-400 px-4 text-xs font-semibold text-zinc-950 hover:bg-emerald-300"
+                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800 px-4 text-xs font-semibold text-zinc-100 hover:bg-zinc-700"
                 >
                   <Send className="size-3.5" />
-                  Send Note / Instruction to Agent
+                  Send Note / Instruction to Agent (Free Note)
                 </button>
               </div>
               <p className="form-error text-xs text-red-300" role="alert" />
@@ -2431,6 +2831,11 @@ export function ProjectDetail({
                 {quest.kind === "PRODUCT" ? "FEATURE" : "TECHNICAL"}
               </span>
               <StatusPill status={implementationComplete(state,quest) ? "REVIEW_REQUIRED" : quest.state} />
+              {quest.state === "PRS_CREATED" && (
+                <span className="rounded border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-300">
+                  Awaiting External Merge
+                </span>
+              )}
               {quest.sprint && (
                 <span className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-zinc-300">
                   {quest.sprint}

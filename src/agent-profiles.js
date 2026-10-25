@@ -135,6 +135,7 @@ export function profileRole(options) {
     "v11-task": "developer",
     "v11-fix": "developer",
     "v11-conflict": "developer",
+    "v11-target": "developer",
     "commit-message": "developer",
     review: "reviewer",
     "v11-review": "reviewer",

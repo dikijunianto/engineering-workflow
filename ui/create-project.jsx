@@ -208,7 +208,7 @@ export function CreateProjectForm({ state, jiraDefault, onCreate, onClose, busy,
   const [tab, setTab] = useState("details"),
     [kind, setKind] = useState("PRODUCT"),
     [source, setSource] = useState("text"),
-    [repos, setRepos] = useState(state.repositories.map((repo) => repo.id)),
+    [repos, setRepos] = useState([]),
     [jira, setJira] = useState(Boolean(initial.project)),
     [project, setProject] = useState(jiraDefault || ""),
     [jiraOverride, setJiraOverride] = useState(false),
@@ -219,10 +219,13 @@ export function CreateProjectForm({ state, jiraDefault, onCreate, onClose, busy,
   useEffect(() => {
     if (bodyRef.current) bodyRef.current.scrollTop = 0;
   }, [tab]);
-  const chooseRepo = (id) => {
-    const next = repos.includes(id) ? repos.filter((value) => value !== id) : [...repos, id];
+  const applyRepos = (next) => {
     setRepos(next);
     if (!jiraOverride) setProject(inheritedJira(workspace, next));
+  };
+  const chooseRepo = (id) => {
+    const next = repos.includes(id) ? repos.filter((value) => value !== id) : [...repos, id];
+    applyRepos(next);
   };
   async function submit(event) {
     event.preventDefault();
@@ -381,31 +384,104 @@ export function CreateProjectForm({ state, jiraDefault, onCreate, onClose, busy,
                 </label>
               </div>
             </details>
-            <fieldset>
-              <legend className="mb-2 text-sm font-medium text-zinc-300">
-                Affected Repositories
-              </legend>
-              <p className="mb-3 text-xs text-zinc-400">
-                Agents inspect only the repositories selected for this project.
+            <fieldset className="space-y-3 rounded-lg border border-zinc-800 bg-zinc-950/60 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <legend className="text-sm font-medium text-zinc-200">
+                  Affected Repositories <span className="text-emerald-400">*</span>
+                </legend>
+                <div className="flex items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className={
+                      repos.length > 0
+                        ? "border-emerald-500/40 bg-emerald-500/10 text-[11px] text-emerald-300"
+                        : "border-amber-500/40 bg-amber-500/10 text-[11px] text-amber-300"
+                    }
+                  >
+                    {repos.length} of {state.repositories.length} selected
+                  </Badge>
+                  {state.repositories.length > 1 && (
+                    <div className="flex items-center gap-1 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => applyRepos(state.repositories.map((r) => r.id))}
+                        className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                      >
+                        Select all
+                      </button>
+                      {repos.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => applyRepos([])}
+                          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-400 hover:bg-zinc-800"
+                        >
+                          Clear
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <p className="text-xs text-zinc-400">
+                Deliberate scope selection required. Agents can read and analyze only the repositories explicitly granted below.
               </p>
               <div className="flex flex-wrap gap-2">
-                {state.repositories.map((repo) => (
-                  <label key={repo.id} className="relative cursor-pointer">
-                    <input
-                      className="peer sr-only"
-                      type="checkbox"
-                      name="repositoryIds"
-                      value={repo.id}
-                      checked={repos.includes(repo.id)}
-                      onChange={() => chooseRepo(repo.id)}
-                    />
-                    <span className="flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs text-zinc-400 transition-colors peer-checked:border-emerald-500/50 peer-checked:bg-emerald-500/10 peer-checked:text-emerald-200 peer-focus-visible:ring-2 peer-focus-visible:ring-emerald-400">
-                      <FolderGit2 className="size-3.5" />
-                      {repo.name}
-                      {repos.includes(repo.id) && <Check className="size-3" />}
-                    </span>
-                  </label>
-                ))}
+                {state.repositories.map((repo) => {
+                  const selected = repos.includes(repo.id);
+                  return (
+                    <label key={repo.id} className="relative cursor-pointer">
+                      <input
+                        className="peer sr-only"
+                        type="checkbox"
+                        name="repositoryIds"
+                        value={repo.id}
+                        checked={selected}
+                        onChange={() => chooseRepo(repo.id)}
+                      />
+                      <span className="flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-300 transition-colors peer-checked:border-emerald-500/60 peer-checked:bg-emerald-500/15 peer-checked:text-emerald-200 peer-focus-visible:ring-2 peer-focus-visible:ring-emerald-400">
+                        <FolderGit2 className={selected ? "size-3.5 text-emerald-400" : "size-3.5 text-zinc-400"} />
+                        <span className="font-medium">{repo.name}</span>
+                        <span className="font-mono text-[10px] text-zinc-400">
+                          ({repo.baseBranch || repo.defaultBranch || "main"})
+                        </span>
+                        {selected && <Check className="size-3.5 text-emerald-400" />}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+              <div
+                role="status"
+                className={`rounded-md border px-3 py-2 text-xs ${
+                  repos.length > 0
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                    : "border-amber-500/30 bg-amber-500/10 text-amber-200"
+                }`}
+              >
+                {repos.length > 0 ? (
+                  <div className="space-y-1">
+                    <p>
+                      <strong>Readable scope ({repos.length}):</strong>{" "}
+                      {state.repositories
+                        .filter((r) => repos.includes(r.id))
+                        .map((r) => r.name)
+                        .join(", ")}
+                    </p>
+                    {state.repositories.some((r) => !repos.includes(r.id)) && (
+                      <p className="text-[11px] text-zinc-300">
+                        Excluded (no agent access):{" "}
+                        {state.repositories
+                          .filter((r) => !repos.includes(r.id))
+                          .map((r) => r.name)
+                          .join(", ")}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p>
+                    No repositories granted yet. Select at least one repository above before creating the project.
+                  </p>
+                )}
               </div>
             </fieldset>
           </TabsContent>

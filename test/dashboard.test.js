@@ -73,7 +73,7 @@ test("empty dashboard has creation action, accessible tabs and no invented proje
   assert.match(html, /role="tablist"/);
   assert.match(html, /Recent Activity Log/);
   assert.match(html, /Quick Actions/);
-  assert.match(html, /Trend unavailable/);
+  assert.doesNotMatch(html, /Trend unavailable/);
   assert.match(html, /Show.*sample project preview/);
   assert.doesNotMatch(html, /Payment API improvements|\+0%/);
 });
@@ -82,7 +82,7 @@ test("populated dashboard displays repositories, active agents, status and actua
   assert.match(html, /payment-service/);
   assert.match(html, /In Progress/);
   assert.match(html, /active agents/);
-  assert.match(html, /diff n\/a/);
+  assert.doesNotMatch(html, /diff n\/a/);
   assert.doesNotMatch(html, /Create First Project/);
 });
 
@@ -212,14 +212,16 @@ test("3D onboarding stages explain app purpose, workflow mechanics and governanc
   const overviewHtml = render(state);
   const sidebarHtml = renderSidebar(state);
   const canvasHtml = renderOnboardingCanvas(0);
-  assert.match(overviewHtml, /How DevQuest Works · 3D Tour/);
+  assert.match(overviewHtml, /Interactive 3D Onboarding/);
   assert.match(overviewHtml, /Explore How DevQuest Works in 3D/);
   assert.match(overviewHtml, /Launch 3D Tour/);
   assert.match(sidebarHtml, /3D Workflow Guide/);
   assert.match(canvasHtml, /<canvas[^>]*class="dq-onboarding-canvas/);
   assert.equal(ONBOARDING_STAGES.length, 7);
+  const stationSteps = ONBOARDING_STAGES.slice(1).map((s) => s.stepNumber);
+  assert.deepEqual(stationSteps, ["01", "02", "03", "04", "05", "06"]);
   for (const stage of ONBOARDING_STAGES) {
-    assert.ok(stage.title && stage.purpose && stage.mechanism && stage.governance);
+    assert.ok(stage.title && stage.purpose && stage.mechanism && stage.governance && stage.workflowStage);
     assert.ok(Array.isArray(stage.highlights) && stage.highlights.length === 4);
     assert.ok(typeof stage.camera.yaw === "number" && typeof stage.camera.zoom === "number");
   }
@@ -432,3 +434,95 @@ test('PR cards surface saved publication errors and show approvals and running p
  assert.match(html,/Creating pull request/);
  assert.doesNotMatch(html,/GitHub provider cannot create a Bitbucket PR/);
 });
+
+test('PR conflict recovery displays the preserved clean snapshot and keeps review actions available',()=>{
+ const state=uiFixture(),work=state.works[0];
+ work.productionReview={verdict:'PASSED',reviewedCommit:'a'.repeat(40)};
+ let html=renderProjectDetail(state,{tab:'work'});
+ assert.match(html,/Resolve PR conflicts/);assert.match(html,/data-expected-head="a{40}"/);
+ work.targetRecovery={state:'MERGING',branch:'epic/project-clean',head:'a'.repeat(40),previousPr:{url:'https://bitbucket.org/team/repo/pull-requests/7'}};
+ html=renderProjectDetail(state,{tab:'work'});
+ assert.match(html,/epic\/project-clean/);assert.match(html,/local, not pushed/);assert.match(html,/Existing PR/);
+ work.targetRecovery.state='RESOLVED';work.pr={url:'https://bitbucket.org/team/repo/pull-requests/7'};
+ html=renderProjectDetail(state,{tab:'work'});
+ assert.match(html,/Review Repository/);assert.doesNotMatch(html,/Resolve PR conflicts/);
+});
+
+test("CreateProjectForm requires deliberate repository selection and never pre-selects all repositories", () => {
+  const state = uiFixture();
+  const html = renderProjectForm(state);
+  assert.match(html, /0 of 2 selected/);
+  assert.match(html, /No repositories granted yet/);
+  assert.doesNotMatch(html, /name="repositoryIds"[^>]*checked/);
+});
+
+test("WorkTab switches to adaptive completed task board when all tasks are completed and preserves Jira links", () => {
+  const state = uiFixture();
+  state.quests[0].state = "PRS_CREATED";
+  state.tasks = state.tasks.map((t) => ({
+    ...t,
+    state: "COMPLETED",
+    jira: {
+      key: "FFE-101",
+      url: "https://example.atlassian.net/browse/FFE-101",
+      issues: [
+        { key: "FFE-101", url: "https://example.atlassian.net/browse/FFE-101" },
+        { key: "FFE-102", url: "https://example.atlassian.net/browse/FFE-102" },
+        { key: "FFE-103", url: "https://example.atlassian.net/browse/FFE-103" },
+      ],
+    },
+  }));
+  const html = renderProjectDetail(state, { tab: "work" });
+  assert.match(html, /All 4 Execution Tasks Completed/);
+  assert.match(html, /Show 4-column board/);
+  assert.match(html, /https:\/\/example\.atlassian\.net\/browse\/FFE-101/);
+  assert.match(html, /\+1 more/);
+  assert.match(html, /Awaiting External Merge/);
+});
+
+test("RoomTab shows readable summaries before raw JSON and clarifies paid CLI turns vs free room notes", () => {
+  const state = uiFixture();
+  state.questRooms = {
+    [state.quests[0].id]: {
+      timeline: [
+        {
+          id: "evt-json",
+          runId: "run-1",
+          taskId: "PAY-T01",
+          kind: "agent",
+          role: "Developer",
+          stage: "Implementation",
+          state: "WAITING_INPUT",
+          body: 'Readable summary before telemetry.\n\n{"type":"waiting_input","taskId":"PAY-T01"}',
+        },
+      ],
+    },
+  };
+  const html = renderProjectDetail(state, { tab: "room" });
+  assert.match(html, /Readable summary before telemetry/);
+  assert.match(html, /Show Raw JSON \/ Telemetry/);
+  assert.match(html, /Waiting for human input/);
+  assert.match(html, /Paid Turn/);
+  assert.match(html, /Free · No Agent/);
+});
+
+test("DocumentsTab hides full local filesystem paths behind an explicit toggle", () => {
+  const state = uiFixture();
+  state.artifacts = [
+    {
+      id: "art-trd",
+      questId: state.quests[0].id,
+      kind: "trd",
+      title: "TRD",
+      version: 2,
+      status: "APPROVED",
+      file: "/Users/secret/local/path/.devquest/artifacts/quest-1/trd-v2.md",
+      markdown: "# Architecture",
+    },
+  ];
+  const html = renderProjectDetail(state, { tab: "documents", focusDocument: "trd" });
+  assert.match(html, /trd-v2\.md/);
+  assert.match(html, /Show full path/);
+  assert.doesNotMatch(html, /\/Users\/secret\/local\/path/);
+});
+

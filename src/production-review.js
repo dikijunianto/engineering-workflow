@@ -34,11 +34,11 @@ export class ProductionReview {
       repositories,
     };
   }
-  invalidateScope(quest) {
+  invalidateScope(quest, includePublished = false) {
     for (const work of this.workflow.e
       .works(quest.id)
       .filter(
-        (work) => !work.pr && work.productionReview?.verdict === "PASSED",
+        (work) => (includePublished || !work.pr) && work.productionReview?.verdict === "PASSED",
       ))
       this.workflow.e.put("works", work, {
         productionReview: null,
@@ -62,7 +62,7 @@ export class ProductionReview {
       )
     )
       return;
-    for (const work of works) if (!work.pr) await this.createPr(quest, work);
+    for (const work of works) if (!work.pr && (!work.targetRecovery || work.humanApprovedCommit === work.productionReview.reviewedCommit)) await this.createPr(quest, work);
   }
   risk(quest, work) {
     const risks = this.workflow.e
@@ -311,9 +311,9 @@ export class ProductionReview {
       "Every repository needs a current passing production review before PR publication",
     );
     assert(
-      quest.execution.mode !== "guided" ||
+      (quest.execution.mode !== "guided" && !work.targetRecovery) ||
         work.humanApprovedCommit === reviewed.head,
-      "Guided mode requires human approval of this exact repository review",
+      "Human approval of this exact repository review is required",
     );
     const repo = this.workflow.e.get("repositories", work.repoId);
     const reviewers =

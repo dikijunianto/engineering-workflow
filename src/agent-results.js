@@ -195,6 +195,8 @@ export function finishAgentRun(workflow, run, result) {
           workflow.e.put("works", workflow.e.get("works", work.id), {
             state: "NEEDS_HUMAN_ATTENTION",
           });
+      } else if (run.purpose === "v11-target") {
+        await workflow.serial(`publish:${work.id}`,()=>workflow.prConflicts.finish(quest,work));
       } else if (["v11-fix", "v11-conflict"].includes(run.purpose)) {
         await workflow.serial(`${quest.id}:${repo.id}`, async () => {
           const current = workflow.e.get("works", work.id);

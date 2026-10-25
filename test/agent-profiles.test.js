@@ -603,6 +603,15 @@ test("a Developer cannot substitute an original checkout or another task workspa
   await f.finish("Stop");
   f.store.put("works",{...work,path:integration,integration:{taskId:"another-task",commit:"task-commit"}});
   assert.throws(()=>f.engine.launch(f.q(),conflict),/exact pending task integration/);
+  const targetRepair={...o,purpose:"v11-target",taskId:undefined,cwd:integration};
+  assert.throws(()=>f.engine.launch(f.q(),targetRepair),/recorded target merge/);
+  f.store.put("works",{...work,path:integration,targetRecovery:{state:"MERGING"}});
+  assert.throws(()=>f.engine.launch(f.q(),{...targetRepair,cwd:dir}),/differs/);
+  const targetRun=f.engine.launch(f.q(),targetRepair);
+  assert.equal(targetRun.profileSnapshot.role,"developer");
+  assert.equal(targetRun.profileSnapshot.capabilities.repositories[0].path,realpathSync(integration));
+  await Promise.resolve();
+  await f.finish("Stop");
 });
 
 test("snapshots survive backend restart; missing private context is actionable and prior evidence remains intact", async (t) => {

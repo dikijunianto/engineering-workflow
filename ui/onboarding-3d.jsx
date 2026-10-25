@@ -35,12 +35,13 @@ export const ONBOARDING_STAGES = [
     id: "pipeline",
     stepNumber: "00",
     shortTitle: "Full 3D Pipeline",
+    workflowStage: "5 Workflow Stages · 6 Tour Stations",
     badge: "System Architecture",
     title: "How DevQuest Turns Ideas into Verified Pull Requests",
     subtitle:
-      "A local-first, deterministic AI engineering workspace that guides product requirements, tech improvements, and QA bugs through gated design, Jira sync, isolated multi-agent coding, and independent review.",
+      "A local-first, deterministic AI engineering workspace that guides product requirements, tech improvements, and QA bugs through 5 gated workflow stages (Define, Plan, Build, Review, Done) across 6 physical stations.",
     roles: ["Orchestrator", "Architect", "Planner", "Jira Specialist", "Developer ×5", "Reviewer"],
-    camera: { targetX: 0, targetY: 0, targetZ: 0, yaw: -0.42, pitch: 0.36, zoom: 0.78 },
+    camera: { targetX: 0, targetY: 0, targetZ: 0, yaw: 0.32, pitch: 0.74, zoom: 1.06 },
     purpose:
       "Eliminate chaotic, unreviewed AI code generation by enforcing structured engineering artifacts, human approval gates, and isolated Git worktrees on your local machine.",
     mechanism:
@@ -48,7 +49,7 @@ export const ONBOARDING_STAGES = [
     governance:
       "100% local loopback execution. No automatic merges, no unverified model substitutions, and no code written until design and Jira gates are explicitly approved.",
     highlights: [
-      "6 Engineering Stations",
+      "5 Workflow Stages Mapped to 6 Stations",
       "Up to 5 Concurrent Isolated Git Worktrees",
       "Immutable Revision-Bound Approvals",
       "Local SQLite + Versioned Markdown State",
@@ -60,22 +61,23 @@ export const ONBOARDING_STAGES = [
     id: "intake",
     stepNumber: "01",
     shortTitle: "1. Intake & Repos",
-    badge: "Define & scope",
+    workflowStage: "Workflow Stage 1 of 5 · Define",
+    badge: "Stage 1 · Define (Intake)",
     title: "Multi-Source Requirement Intake & Repository Binding",
     subtitle:
       "Start a Product Quest from documents, a Tech Quest from an engineering idea, or a bug fix linked to an existing QA Jira issue.",
     roles: ["Architect", "Repository Resolver"],
-    camera: { targetX: -420, targetY: 5, targetZ: 50, yaw: -0.25, pitch: 0.32, zoom: 1.42 },
+    camera: { targetX: -8, targetY: 1, targetZ: -4, yaw: 0.42, pitch: 0.68, zoom: 1.12 },
     purpose:
-      "Bring raw requirements and target Git repositories together with strict branch policies before any AI agent touches your codebase.",
+      "Bring raw requirements and explicitly selected Git repositories together with strict branch policies before any AI agent touches your codebase.",
     mechanism:
       "Ingests local Markdown (.md), plain text (.txt), PDFs (up to 200 pages), Word (.docx), or HTTPS Confluence pages. Tech Quests include interactive AI brainstorming to refine technical briefs first.",
     governance:
-      "Repositories enforce base branch, PR target branch, branch protection patterns, and OS-level workspace path verification before execution.",
+      "Deliberate repository scope selection required. Enforces base branch, PR target branch, branch protection patterns, and OS-level workspace path verification.",
     highlights: [
       "Ingest .md, .txt, .pdf, .docx & Confluence",
       "Interactive AI Brainstorming for Tech Quests",
-      "Multi-Repository Impact Scope & Branch Policy",
+      "Explicit Repository Scope & Branch Policy",
       "Zero-Inference Readiness & Access Preflight",
     ],
     ctaLabel: "Import Repository",
@@ -83,42 +85,44 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "analysis",
-    shortTitle: "Analysis",
-    badge: "Read-only discovery",
     stepNumber: "02",
-    title: "Inspect the selected repositories",
-    subtitle: "Understand services and dependencies before choosing a design.",
+    shortTitle: "2. Repo Analysis",
+    workflowStage: "Workflow Stage 1 of 5 · Define",
+    badge: "Stage 1 · Define (Discovery)",
+    title: "Read-Only Repository Impact & Dependency Analysis",
+    subtitle: "Inspect the selected repositories to map affected services and boundaries before choosing a design.",
     roles: ["Architect"],
-    camera: { yaw: 0.38, zoom: 1 },
+    camera: { targetX: 0, targetY: 1, targetZ: -4, yaw: -0.28, pitch: 0.66, zoom: 1.12 },
     purpose:
-      "Map the affected services and identify constraints using only the repositories selected for this project.",
+      "Map the affected services and identify architectural constraints using only the repositories explicitly selected for this project.",
     mechanism:
-      "Repository-scoped inspection feeds the technical design. This illustration does not run an agent or read repository files.",
+      "Repository-scoped read-only inspection feeds the technical design (analysis.md). This tour illustration does not run an agent or read repository files.",
     governance:
-      "Read-only analysis. Implementation requires an approved plan and the existing execution gates.",
+      "Strictly read-only discovery on selected repositories. Implementation requires an approved TRD, approved plan, and execution gates.",
     highlights: [
-      "Selected repositories only",
-      "Read-only discovery",
-      "Dependency analysis",
-      "No implementation",
+      "Selected Repositories Only",
+      "Read-Only Service Discovery",
+      "Cross-Repo Dependency Mapping",
+      "Zero Code Modification",
     ],
-    ctaLabel: "View repositories",
+    ctaLabel: "View Repositories",
     ctaAction: "addRepository",
   },
   {
     id: "design",
-    stepNumber: "02",
-    shortTitle: "2. TRD & Plan Gates",
-    badge: "Architecture & planning",
+    stepNumber: "03",
+    shortTitle: "3. TRD & Plan Gates",
+    workflowStage: "Workflow Stage 2 of 5 · Plan",
+    badge: "Stage 2 · Plan (Architecture)",
     title: "AI Architect, Implementation Plan & Immutable Approval Gates",
     subtitle:
       "Generate, inspect, and edit the Technical Requirements Document (TRD), optional Specification, and dependency-aware Implementation Plan.",
     roles: ["Architect", "Planner"],
-    camera: { targetX: -210, targetY: 10, targetZ: -45, yaw: 0.18, pitch: 0.34, zoom: 1.48 },
+    camera: { targetX: 8, targetY: 1, targetZ: -4, yaw: 0.36, pitch: 0.68, zoom: 1.12 },
     purpose:
       "Ensure the technical architecture, repository assignments, task dependencies, and test validation profiles are agreed upon before coding begins.",
     mechanism:
-      "The Architect Agent analyzes your repositories in read-only mode to produce trd.md. After TRD approval, the Planner Agent generates plan.md with task dependency graphs and test profiles.",
+      "The Architect Agent produces trd.md from the repository analysis. After TRD approval, the Planner Agent generates plan.md with task dependency graphs and test profiles.",
     governance:
       "Approvals bind to immutable artifact revisions. Editing any draft automatically invalidates prior approval and requires explicit human re-approval.",
     highlights: [
@@ -132,14 +136,15 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "jira",
-    stepNumber: "03",
-    shortTitle: "3. Jira Appendix",
-    badge: "Backlog synchronization",
+    stepNumber: "04",
+    shortTitle: "4. Jira Backlog",
+    workflowStage: "Workflow Stage 2 of 5 · Plan",
+    badge: "Stage 2 · Plan (Backlog Sync)",
     title: "Weighted Jira Appendix & Controlled Batch Publication",
     subtitle:
       "Translate your approved engineering plan into weighted Jira tasks with sample-first verification, or link an existing QA issue.",
     roles: ["Jira Specialist"],
-    camera: { targetX: 0, targetY: 5, targetZ: 45, yaw: -0.12, pitch: 0.35, zoom: 1.48 },
+    camera: { targetX: 8, targetY: 1, targetZ: 5, yaw: -0.34, pitch: 0.65, zoom: 1.12 },
     purpose:
       "Bridge engineering architecture and project management with calibrated complexity weights (V / L / M / H) and safe, duplicate-free Jira publishing.",
     mechanism:
@@ -157,14 +162,15 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "worktrees",
-    stepNumber: "04",
-    shortTitle: "4. Agent Worktrees",
-    badge: "Parallel execution",
+    stepNumber: "05",
+    shortTitle: "5. Agent Worktrees",
+    workflowStage: "Workflow Stage 3 of 5 · Build",
+    badge: "Stage 3 · Build (Parallel Execution)",
     title: "Task-Isolated Git Worktrees & Multi-Agent Orchestration",
     subtitle:
       "Execute up to 5 concurrent Developer Agents in isolated Git worktrees with verified model routing and serialized branch integration.",
     roles: ["Orchestrator", "Developer ×5"],
-    camera: { targetX: 215, targetY: -5, targetZ: -40, yaw: 0.28, pitch: 0.38, zoom: 1.38 },
+    camera: { targetX: 0, targetY: 1, targetZ: 5, yaw: 0.26, pitch: 0.7, zoom: 1.12 },
     purpose:
       "Run parallel AI implementation tasks across repositories safely without branch collisions, dirty working trees, or unverified model fallbacks.",
     mechanism:
@@ -182,25 +188,26 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "review",
-    stepNumber: "05",
-    shortTitle: "5. Review & PR",
-    badge: " Production Gate & Handoff",
-    title: "Independent Production Review, GitHub PR & Team Notification",
+    stepNumber: "06",
+    shortTitle: "6. Review & PR",
+    workflowStage: "Workflow Stages 4–5 · Review & Done",
+    badge: "Stages 4–5 · Review & PR Handoff",
+    title: "Independent Production Review, PR Creation & Team Handoff",
     subtitle:
-      "Audit integrated repository changes through an independent Reviewer Agent, create standardized Pull Requests, and notify Google Chat.",
+      "Audit integrated repository changes through an independent Reviewer Agent, open Pull Requests for human review, and notify Google Chat.",
     roles: ["Reviewer", "GitHub CLI", "Google Chat"],
-    camera: { targetX: 425, targetY: 10, targetZ: 45, yaw: 0.35, pitch: 0.33, zoom: 1.45 },
+    camera: { targetX: -8, targetY: 1, targetZ: 5, yaw: -0.32, pitch: 0.66, zoom: 1.12 },
     purpose:
-      "Verify that all integrated tasks meet production readiness standards and human QA checklists before opening a Pull Request.",
+      "Verify that all integrated tasks meet production readiness standards and human QA checklists before opening a Pull Request for external merge.",
     mechanism:
       "An independent Reviewer Agent inspects the integrated repository diff (bounded to 3 review/fix cycles). Generates office commit messages: <type> : <description> (branch).",
     governance:
-      "PR creation is explicit opt-in via authenticated gh CLI and verifies the remote head matches the reviewed commit. Reviewer assignment and Google Chat notifications are tracked with idempotent retries.",
+      "PR creation is explicit opt-in and never merges automatically. External human review and merge remain required on GitHub/Bitbucket.",
     highlights: [
       "Mandatory Independent Production-Readiness Gate",
       "Bounded Review/Fix Cycles (Max 3 Attempts)",
       "Human Tests & QA Observation Checklist",
-      "Verified GitHub PR + Google Chat Handoff",
+      "Explicit PR Creation (Awaits Human Merge)",
     ],
     ctaLabel: "Start Building Now",
     ctaAction: "newProject",
@@ -228,19 +235,20 @@ export function Onboarding3DModal({ open, onOpenChange, state, actions = {}, ini
     setStageIndex(initialStage);
   }, [initialStage]);
 
+  const lastStageIndex = ONBOARDING_STAGES.length - 1;
   const stage = ONBOARDING_STAGES[stageIndex] || ONBOARDING_STAGES[0];
   useEffect(() => {
-    if (!open || !autoPlay || reducedMotion || stageIndex === 5) return;
+    if (!open || !autoPlay || reducedMotion || stageIndex === lastStageIndex) return;
     const timer = setTimeout(
       () => setStageIndex((prev) => (prev + 1) % ONBOARDING_STAGES.length),
       AUTO_PLAY_DURATION_MS,
     );
     return () => clearTimeout(timer);
-  }, [open, autoPlay, stageIndex, reducedMotion]);
+  }, [open, autoPlay, stageIndex, reducedMotion, lastStageIndex]);
 
   useEffect(() => {
-    if (stageIndex === 5 || reducedMotion) setAutoPlay(false);
-  }, [stageIndex, reducedMotion]);
+    if (stageIndex === lastStageIndex || reducedMotion) setAutoPlay(false);
+  }, [stageIndex, reducedMotion, lastStageIndex]);
 
   const selectStage = useCallback((idx) => {
     setAutoPlay(false);
@@ -288,22 +296,21 @@ export function Onboarding3DModal({ open, onOpenChange, state, actions = {}, ini
                   variant="outline"
                   className="border-emerald-500/30 bg-emerald-500/10 text-[10px] text-emerald-300"
                 >
-                  {stageIndex === 5 ? "Interactive guide" : "Interactive 3D"}
+                  {stageIndex === lastStageIndex ? "Final Station · Stages 4–5" : "Interactive 3D"}
                 </Badge>
               </DialogTitle>
               <DialogDescription className="text-xs text-zinc-400">
-                Explore what DevQuest does and how requirements flow through AI agents, Git
-                worktrees, and human approval gates.
+                5 workflow stages (Define, Plan, Build, Review, Done) illustrated across 6 physical engineering stations.
               </DialogDescription>
             </div>
           </div>
-          {stageIndex !== 5 && (
+          {stageIndex !== lastStageIndex && (
             <div className="flex items-center gap-2">
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
-                disabled={stageIndex === 5 || reducedMotion}
+                disabled={stageIndex === lastStageIndex || reducedMotion}
                 onClick={() => setAutoPlay((v) => !v)}
                 className="h-8 gap-1.5 border-zinc-700 bg-zinc-900 text-xs text-zinc-200 hover:bg-zinc-800"
               >
@@ -351,6 +358,7 @@ export function Onboarding3DModal({ open, onOpenChange, state, actions = {}, ini
         >
           {ONBOARDING_STAGES.map((item, idx) => {
             const active = idx === stageIndex;
+            const cleanTitle = item.shortTitle.replace(/^\d+\.\s*/, "");
             return (
               <button
                 key={item.id}
@@ -360,13 +368,18 @@ export function Onboarding3DModal({ open, onOpenChange, state, actions = {}, ini
                 tabIndex={active ? 0 : -1}
                 aria-controls="dq-tour-stage"
                 onClick={() => selectStage(idx)}
-                className={`flex shrink-0 items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                   active
                     ? "border-emerald-500/50 bg-emerald-500/15 text-emerald-300"
                     : "border-transparent bg-zinc-900/60 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
                 }`}
               >
-                <span>{item.shortTitle.replace(/^\d+\.\s*/, "")}</span>
+                {idx > 0 && (
+                  <span className="font-mono text-[10px] text-emerald-400/90">
+                    {item.stepNumber}
+                  </span>
+                )}
+                <span>{cleanTitle}</span>
               </button>
             );
           })}
@@ -389,10 +402,10 @@ export function Onboarding3DModal({ open, onOpenChange, state, actions = {}, ini
                     variant="outline"
                     className="border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-300"
                   >
-                    {stage.badge}
+                    {stage.workflowStage || stage.badge}
                   </Badge>
-                  <span className="font-mono text-xs text-zinc-400">
-                    {stageIndex === 0 ? "Overview" : `Station ${stageIndex} / 6`}
+                  <span className="rounded border border-zinc-800 bg-zinc-950 px-2 py-0.5 font-mono text-[11px] text-zinc-400">
+                    {stageIndex === 0 ? "Pipeline Overview (6 Stations)" : `Station 0${stageIndex} of 06`}
                   </span>
                 </div>
 

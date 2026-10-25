@@ -3,6 +3,7 @@ import { TaskScheduler, active, claimed, processExists, taskRetryLimit } from ".
 import { assert, executionConfig, resolveRoute } from "./routing.js";
 import { finishAgentRun } from "./agent-results.js";
 import { ProductionReview } from "./production-review.js";
+import { PrConflicts } from "./pr-conflicts.js";
 import { RepositoryOperations } from "./repositories.js";
 
 const now = () => new Date().toISOString();
@@ -21,6 +22,7 @@ const handled = new Set([
   "REVIEW_REPOSITORY",
   "APPROVE_REVIEW",
   "CREATE_PR",
+  "RESOLVE_PR_CONFLICT",
   "ASSESS_TASKS",
   "SET_QUEST_EXECUTION",
   "SET_PR_TARGET",
@@ -34,6 +36,7 @@ export class Orchestration {
     this.s = engine.store;
     this.git = new RepositoryOperations(this.s, engine.adapters.git);
     this.production = new ProductionReview(this);
+    this.prConflicts = new PrConflicts(this);
     this.scheduler = new TaskScheduler(this);
     this.pending = new Map();
     this.integrationLocks = new Map();
@@ -269,6 +272,10 @@ export class Orchestration {
         !this.e.jobs.has(run.id) && !processExists(run.pid),
         "Stop the existing agent process before continuing",
       );
+      if (run.purpose === "v11-target") {
+        const work=this.e.get("works",run.workId);
+        return this.prConflicts.resolve(quest,work,work.targetRecovery?.head,{run,message:p.message || "Continue the preserved target merge"});
+      }
       if (run.profileSnapshot) {
         assert(
           ["WAITING_INPUT", "PAUSED", "INTERRUPTED", "FAILED"].includes(run.state),
@@ -436,7 +443,14 @@ export class Orchestration {
     }
     const work = this.e.get("works", p.workId);
     assert(work.questId === quest.id, "Repository work belongs to another Quest");
+    if (type === "RESOLVE_PR_CONFLICT") {
+      assert(p.confirmAgentRun === true, "Confirm the conflict repair agent run");
+      return this.background(`pr-conflict:${work.id}`,quest.id,
+        ()=>this.prConflicts.resolve(quest,work,p.expectedHead),
+        error=>this.e.put("works",this.e.get("works",work.id),{state:"NEEDS_HUMAN_ATTENTION",error:error.message}));
+    }
     if (type === "SET_PR_TARGET") {
+      assert(!work.targetRecovery || work.targetRecovery.state === "RESOLVED", "Finish the recorded PR conflict recovery before changing its target");
       assert(
         !work.pr &&
           !this.pending.has(`integration:${work.id}`) &&
