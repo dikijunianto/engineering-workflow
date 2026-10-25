@@ -1,0 +1,7 @@
+T1.1 is created as FCAD-6297. I read the issue back to verify it, and the parent Epic (FCAD-6205), assignee (Diki Junianto), Weight Points (3), Story Point Type (Technical) and the three Choose Appendix options all match the approved fields.
+
+Before creating it, a marker search found no existing issues, and FCAD-6205 resolved as an Epic in FCAD. That search only covers issues visible to this Jira account, which is the scope the user already accepted for this run. Only this one sample was created, and no further batch is authorized.
+
+```json
+{"results":[{"taskId":"1e5c7016-f508-426c-a6d1-ce67bfb5aa00_T1","appendixTaskId":"T1.1","key":"FCAD-6297","url":"https://amarbank.atlassian.net/browse/FCAD-6297","complete":false}]}
+```

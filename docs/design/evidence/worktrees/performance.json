@@ -1,0 +1,43 @@
+{
+  "scope": "Isolated production-mode component fixture; page-wide RAF includes browser automation; callback time excludes React commit and paint.",
+  "normal": {
+    "viewport": [
+      1280,
+      720
+    ],
+    "reduced": false,
+    "frames": 67,
+    "callbackP95ms": 0.10000002384185791,
+    "maxFrameGap": 33.399999999999636,
+    "longTasks": [
+      121
+    ],
+    "loadMs": 241.90000000596046,
+    "assets": [
+      {
+        "name": "/style.css",
+        "bytes": 38554,
+        "ms": 12.700000017881393
+      },
+      {
+        "name": "/dashboard.css",
+        "bytes": 57630,
+        "ms": 14.300000011920929
+      },
+      {
+        "name": "/preview.js",
+        "bytes": 351128,
+        "ms": 15.799999982118607
+      }
+    ]
+  },
+  "reducedMotion": {
+    "camera": "0.220,0.850,1.000",
+    "transitionDuration": "0s",
+    "preference": "matchMedia fixture; not OS setting"
+  },
+  "idleComparison": {
+    "before": 67,
+    "after": 67
+  }
+}

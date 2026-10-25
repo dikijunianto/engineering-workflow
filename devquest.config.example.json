@@ -1,5 +1,38 @@
 {
-  "sourceControl": { "reviewers": ["replace-with-github-username"] },
+  "sourceControl": { "reviewers": [] },
   "googleChat": { "webhookEnv": "DEVQUEST_GOOGLE_CHAT_WEBHOOK" },
-  "testing": { "credentialEnv": [] }
+  "testing": { "credentialEnv": [] },
+  "orchestration": {
+    "maxConcurrentDeveloperAgents": 5,
+    "claudeSafeFallback": "acceptEdits",
+    "allowedFamilies": ["haiku", "sonnet", "opus", "gpt"],
+    "deniedFamilies": ["fable"],
+    "models": [
+      {
+        "id": "claude-haiku-5-5",
+        "runtime": "claude",
+        "family": "haiku",
+        "available": false,
+        "verified": false,
+        "efforts": ["low", "medium", "high"]
+      },
+      {
+        "id": "claude-sonnet-5-5",
+        "runtime": "claude",
+        "family": "sonnet",
+        "available": false,
+        "verified": false,
+        "efforts": ["low", "medium", "high"]
+      },
+      {
+        "id": "claude-opus-5-5",
+        "runtime": "claude",
+        "family": "opus",
+        "available": false,
+        "verified": false,
+        "efforts": ["low", "medium", "high"]
+      }
+    ],
+    "fallbacks": {}
+  }
 }

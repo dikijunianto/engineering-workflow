@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { Store } from "./store.js";
 import { Engine, ACTIONS } from "./engine.js";
+import { buildStatus } from "./readiness.js";
 import { createAdapters } from "./adapters.js";
 
 const publicDir = fileURLToPath(new URL("../public/", import.meta.url));
@@ -16,11 +17,11 @@ const assets = new Map([
     "/vendor/marked.js",
     ["../node_modules/marked/lib/marked.esm.js", "text/javascript"],
   ],
+  ["/dashboard.js", ["dashboard.js", "text/javascript"]],
+  ["/dashboard.css", ["dashboard.css", "text/css"]],
   ["/style.css", ["style.css", "text/css"]],
-  [
-    "/devquest/backgrounds/midnight-reach.png",
-    ["devquest/backgrounds/midnight-reach.png", "image/png"],
-  ],
+  ["/icons/lucide.svg", ["icons/lucide.svg", "image/svg+xml"]],
+  ["/icons/LICENSE-lucide.txt", ["icons/LICENSE-lucide.txt", "text/plain"]],
 ]);
 const json = (response, status, value) => {
   response.writeHead(status, {
@@ -145,7 +146,7 @@ export async function createServer({
         return response.end(readFileSync(path.join(publicDir, file)));
       }
       if (request.method === "GET" && url.pathname === "/api/session")
-        return json(response, 200, { token });
+        return json(response, 200, { token, actions: [...ACTIONS], ...buildStatus() });
       if (request.method === "GET" && url.pathname === "/api/state")
         return json(response, 200, engine.snapshot());
       if (
@@ -202,6 +203,8 @@ export async function createServer({
         const input = await body(request);
         if (!input || Array.isArray(input) || !ACTIONS.has(input.type))
           throw new Error("Unknown action");
+        if (input.type !== "CHECK_READINESS" && buildStatus().restartRequired)
+          return json(response, 409, { error: "DevQuest files changed. Restart DevQuest and reload this page before continuing." });
         if (input.type === "CREATE_QUEST" && input.file)
           input.content = await importFile(input.file);
         const { type, ...parameters } = input;

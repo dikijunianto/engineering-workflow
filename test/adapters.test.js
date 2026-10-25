@@ -1,6 +1,8 @@
+import { jiraEvidence } from "./jira-fixture.js";
+import { readyPublisherInput } from "./publisher-input.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -13,6 +15,7 @@ import {
   GitHubProvider,
   GoogleChatWebhook,
   SkillRunner,
+  parsePublisherResponse,
   createAdapters,
   runProcess,
 } from "../src/adapters.js";
@@ -29,13 +32,7 @@ async function repositoryFixture(t) {
   await git(directory, "init", "-b", "development");
   await git(directory, "config", "user.email", "devquest@example.test");
   await git(directory, "config", "user.name", "DevQuest Test");
-  await git(
-    directory,
-    "remote",
-    "add",
-    "origin",
-    "https://example.test/acme/repo.git",
-  );
+  await git(directory, "remote", "add", "origin", "https://example.test/acme/repo.git");
   await writeFile(path.join(directory, "README.md"), "base\n");
   await git(directory, "add", "README.md");
   await git(directory, "commit", "-m", "base");
@@ -54,10 +51,7 @@ test("adapter bundle exposes its trusted configuration for engine status", async
 
 test("missing base branch reports a recoverable setup error without creating work", async (t) => {
   const repo = await repositoryFixture(t);
-  const worktree = path.join(
-    path.dirname(repo),
-    `${path.basename(repo)}-missing-base`,
-  );
+  const worktree = path.join(path.dirname(repo), `${path.basename(repo)}-missing-base`);
   t.after(() => rm(worktree, { recursive: true, force: true }));
   const { git: adapter } = await createAdapters();
   await adapter.register(repo);
@@ -82,22 +76,148 @@ test("missing base branch reports a recoverable setup error without creating wor
   });
 });
 
+test("v1.1 Claude args enforce explicit models, Auto capability and no nested or shell tools", () => {
+  const runtime = new ClaudeCodeRuntime();
+  runtime.help = "--permission-mode --restricted --disallowedTools --settings --model --effort";
+  runtime.capabilities = { autoMode: true };
+  const route = { resolvedModel: "claude-opus-5-5", resolvedEffort: "high" };
+  const args = runtime.buildArgs({
+    readOnly: false,
+    route,
+    executionPolicy: {},
+  });
+  assert.equal(args[args.indexOf("--model") + 1], "claude-opus-5-5");
+  assert.equal(args[args.indexOf("--effort") + 1], "high");
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "auto");
+  assert.ok(args.includes("--restricted"));
+  const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+  assert.deepEqual(settings.availableModels, ["claude-opus-5-5"]);
+  assert.ok(settings.permissions.deny.includes("Agent"));
+  assert.match(args[args.indexOf("--disallowedTools") + 1], /Agent.*Bash/);
+  assert.doesNotMatch(args.join(" "), /dangerously|bypassPermissions/);
+  runtime.capabilities.autoMode = false;
+  assert.throws(
+    () => runtime.buildArgs({ route, readOnly: false, executionPolicy: {} }),
+    /Auto Mode unavailable/,
+  );
+  const fallback = runtime.buildArgs({
+    route,
+    readOnly: false,
+    executionPolicy: { safeFallback: "acceptEdits" },
+  });
+  assert.equal(fallback[fallback.indexOf("--permission-mode") + 1], "acceptEdits");
+  assert.throws(
+    () =>
+      runtime.buildArgs({
+        route: { ...route, resolvedModel: "fable-5" },
+        executionPolicy: {},
+      }),
+    /Fable/,
+  );
+  const readonly = runtime.buildArgs({
+    route,
+    readOnly: true,
+    executionPolicy: {},
+  });
+  assert.equal(readonly[readonly.indexOf("--permission-mode") + 1], "dontAsk");
+  assert.equal(readonly[readonly.indexOf("--tools") + 1], "Read,Glob,Grep");
+});
+
+test("publication rejects protected/unowned branches and pins the reviewed push SHA", async () => {
+  const calls = [];
+  let pushed = false;
+  const commit = "b".repeat(40);
+  const provider = new GitHubProvider({
+    runner: async (file, args) => {
+      calls.push([file, args]);
+      if (file === "git" && args[0] === "rev-parse") return { code: 0, stdout: commit, stderr: "" };
+      if (file === "git" && args[0] === "push") {
+        pushed = true;
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (file === "gh" && args[1] === "list")
+        return {
+          code: 0,
+          stdout: JSON.stringify(
+            pushed
+              ? [
+                  {
+                    url: "https://github.com/test/repo/pull/1",
+                    number: 1,
+                    headRefOid: commit,
+                  },
+                ]
+              : [],
+          ),
+          stderr: "",
+        };
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  for (const branch of ["main", "master", "feature/unowned", "task/no-owner"])
+    await assert.rejects(
+      provider.create({ path: process.cwd(), branch, baseBranch: "main" }),
+      /Push refused|ownership/,
+    );
+  assert.equal(calls.length, 0);
+  const branch = "quest/q-r";
+  await provider.create({
+    path: process.cwd(),
+    branch,
+    baseBranch: "main",
+    title: "Reviewed",
+    body: "Validated",
+    ownership: { path: process.cwd(), branch },
+    expectedHead: commit,
+    protectedBranches: ["main", "master"],
+  });
+  assert.ok(
+    calls.some(
+      ([file, args]) =>
+        file === "git" && args[0] === "push" && args.includes(`${commit}:refs/heads/${branch}`),
+    ),
+  );
+});
+
+test("runtime-reported forbidden models cannot be accepted as successful turns", async () => {
+  const runtime = new ClaudeCodeRuntime({
+    runner: async () => ({
+      code: 0,
+      stdout:
+        JSON.stringify({ type: "system", model: "claude-fable-5" }) +
+        "\n" +
+        JSON.stringify({ type: "result", result: "Done" }),
+      stderr: "",
+    }),
+  });
+  runtime.capabilities = {
+    available: true,
+    modelSelection: true,
+    effortSelection: true,
+  };
+  runtime.help = "--permission-mode";
+  await assert.rejects(
+    runtime.start({
+      cwd: process.cwd(),
+      prompt: "Read",
+      readOnly: true,
+      route: { resolvedModel: "claude-opus-5-5", resolvedEffort: "high" },
+    }),
+    /Fable|unexpected model/,
+  );
+});
+
 test("git adapter registers only repository roots and reconciles its own worktrees", async (t) => {
   const repo = await repositoryFixture(t);
   const nested = path.join(repo, "nested");
-  const worktree = path.join(
-    path.dirname(repo),
-    `${path.basename(repo)}-worktree`,
-  );
+  const worktree = path.join(path.dirname(repo), `${path.basename(repo)}-worktree`);
   await mkdir(nested);
   t.after(() => rm(worktree, { recursive: true, force: true }));
 
   const { git: adapter } = await createAdapters();
   await assert.rejects(adapter.register(nested), /repository root/i);
   assert.deepEqual(await adapter.register(repo), {
-    path: await import("node:fs/promises").then(({ realpath }) =>
-      realpath(repo),
-    ),
+    path: await import("node:fs/promises").then(({ realpath }) => realpath(repo)),
     name: path.basename(repo),
     remote: "https://example.test/acme/repo.git",
   });
@@ -215,10 +335,7 @@ test(
     const { git: adapter } = await createAdapters({ runner });
     assert.equal((await adapter.test(process.cwd(), "npm-test")).passed, true);
     assert.equal(calls[0].file, process.execPath);
-    assert.match(
-      calls[0].args[0],
-      /node_modules[\\/]npm[\\/]bin[\\/]npm-cli\.js$/,
-    );
+    assert.match(calls[0].args[0], /node_modules[\\/]npm[\\/]bin[\\/]npm-cli\.js$/);
     assert.equal(calls[0].args[1], "test");
   },
 );
@@ -233,9 +350,9 @@ test("Codex runtime verifies flags, streams events, disables persistence, and re
         stdout: "--json --ephemeral --sandbox resume",
         stderr: "",
       };
-    if (args.includes("--version"))
-      return { code: 0, stdout: "codex 1.0", stderr: "" };
+    if (args.includes("--version")) return { code: 0, stdout: "codex 1.0", stderr: "" };
     options.onStdout?.('{"type":"thread.started","thread_id":"native-1"}\n');
+    options.onStdout?.('{"type":"item.started","item":{"type":"mcp_tool_call"}}\n');
     options.onStdout?.(
       `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "finished" } })}\n`,
     );
@@ -247,6 +364,11 @@ test("Codex runtime verifies flags, streams events, disables persistence, and re
     interactive: true,
     nativeResume: false,
     streaming: true,
+    version: "codex 1.0",
+    modelSelection: false,
+    effortSelection: false,
+    autoMode: false,
+    nestedRestriction: false,
   });
   assert.ok(calls.some(({ args }) => args.join(" ") === "exec --help"));
 
@@ -268,11 +390,26 @@ test("Codex runtime verifies flags, streams events, disables persistence, and re
   assert.equal(result.summary, "finished");
   assert.equal(result.sessionId, undefined);
   assert.equal(result.waitingInput, false);
-  assert.ok(
-    events.some(
-      ({ type, text }) => type === "output" && text.includes("finished"),
-    ),
-  );
+  assert.ok(events.some(({ type, text }) => type === "output" && text.includes("finished")));
+  assert.deepEqual(events.filter((event) => event.type === "heartbeat").map((event) => event.activity), ["CONNECTED", "TOOL_RUNNING", "RESPONDING"]);
+});
+
+test("Claude reports runtime activity without leaking tool inputs into progress events", async () => {
+  const events = [];
+  const runtime = new ClaudeCodeRuntime({ runner: async (_file, _args, options) => {
+    for (const event of [
+      { type: "system", subtype: "init" },
+      { type: "assistant", message: { content: [{ type: "tool_use", name: "Read", input: { file_path: "private-path" } }] } },
+      { type: "user", message: { content: [{ type: "tool_result", content: "private-result" }] } },
+      { type: "result", result: "done" },
+    ]) options.onStdout(JSON.stringify(event) + "\n");
+    return { code: 0, stdout: "", stderr: "" };
+  } });
+  runtime.detectCapabilities = async () => ({ available: true });
+  await runtime.start({ cwd: process.cwd(), onEvent: (event) => events.push(event) });
+  const progress = events.filter((event) => event.type === "heartbeat");
+  assert.deepEqual(progress.map((event) => event.activity), ["CONNECTED", "TOOL_RUNNING", "TOOL_FINISHED", "RESPONDING"]);
+  assert.doesNotMatch(JSON.stringify(progress), /private-path|private-result/);
 });
 
 test("Claude runtime uses native resume only when persistence is configured", async () => {
@@ -286,8 +423,7 @@ test("Claude runtime uses native resume only when persistence is configured", as
           "--print --output-format --verbose --no-session-persistence --permission-mode --allowedTools --resume --tools --strict-mcp-config --mcp-config",
         stderr: "",
       };
-    if (args.includes("--version"))
-      return { code: 0, stdout: "claude 1.0", stderr: "" };
+    if (args.includes("--version")) return { code: 0, stdout: "claude 1.0", stderr: "" };
     options.onStdout?.(
       `${JSON.stringify({ type: "result", result: "continued", session_id: "session-2" })}\n`,
     );
@@ -318,8 +454,7 @@ test("runtime final artifacts never exceed their public size bounds", async () =
   const runner = async (_file, args, options = {}) => {
     if (args.includes("--help"))
       return { code: 0, stdout: "--json --ephemeral --sandbox", stderr: "" };
-    if (args.includes("--version"))
-      return { code: 0, stdout: "codex 1.0", stderr: "" };
+    if (args.includes("--version")) return { code: 0, stdout: "codex 1.0", stderr: "" };
     options.onStdout?.(
       `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "x".repeat(101_000) } })}\n`,
     );
@@ -334,13 +469,9 @@ test("runtime final artifacts never exceed their public size bounds", async () =
 });
 
 test("process runner tolerates a child closing stdin early", async () => {
-  const result = await runProcess(
-    process.execPath,
-    ["-e", "process.stdin.destroy()"],
-    {
-      input: "x".repeat(5_000_000),
-    },
-  );
+  const result = await runProcess(process.execPath, ["-e", "process.stdin.destroy()"], {
+    input: "x".repeat(5_000_000),
+  });
   assert.equal(result.code, 0);
 });
 
@@ -348,8 +479,7 @@ test("Codex recognizes resume when help advertises it as an exec subcommand", as
   const calls = [];
   const runner = async (_file, args, options = {}) => {
     calls.push(args);
-    if (args.includes("--version"))
-      return { code: 0, stdout: "codex 1.0", stderr: "" };
+    if (args.includes("--version")) return { code: 0, stdout: "codex 1.0", stderr: "" };
     if (args.join(" ") === "exec --help")
       return {
         code: 0,
@@ -385,8 +515,7 @@ test("Codex recognizes resume when help advertises it as an exec subcommand", as
 
 test("runtime error events fail turns even when the CLI exits zero", async () => {
   const codexRunner = async (_file, args, options = {}) => {
-    if (args.includes("--version"))
-      return { code: 0, stdout: "codex 1.0", stderr: "" };
+    if (args.includes("--version")) return { code: 0, stdout: "codex 1.0", stderr: "" };
     if (args.includes("--help"))
       return { code: 0, stdout: "--json --sandbox --ephemeral", stderr: "" };
     options.onStdout?.(
@@ -395,8 +524,7 @@ test("runtime error events fail turns even when the CLI exits zero", async () =>
     return { code: 0, stdout: "", stderr: "" };
   };
   const claudeRunner = async (_file, args, options = {}) => {
-    if (args.includes("--version"))
-      return { code: 0, stdout: "claude 1.0", stderr: "" };
+    if (args.includes("--version")) return { code: 0, stdout: "claude 1.0", stderr: "" };
     if (args.includes("--help"))
       return {
         code: 0,
@@ -432,10 +560,7 @@ test("Jira skill bridge receives stable idempotency keys and preserves partial r
     return {
       code: 1,
       stdout: JSON.stringify({
-        results: [
-          null,
-          { taskId: "task-a", key: "APP-1", url: "https://jira.example/APP-1" },
-        ],
+        results: [null, { taskId: "task-a", key: "APP-1", url: "https://jira.example/APP-1" }],
       }),
       stderr: "one task failed",
     };
@@ -457,17 +582,14 @@ test("Jira skill bridge receives stable idempotency keys and preserves partial r
   ]);
   await skill.publish(input);
   assert.deepEqual(
-    payloads[0].tasks.map(({ taskId, idempotencyKey }) => [
-      taskId,
-      idempotencyKey,
-    ]),
+    payloads[0].tasks.map(({ taskId, idempotencyKey }) => [taskId, idempotencyKey]),
     [
       ["task-a", "devquest:quest-1:task-a"],
       ["task-b", "devquest:quest-1:task-b"],
     ],
   );
   assert.deepEqual(payloads[0].tasks, payloads[1].tasks);
-  await assert.rejects(new SkillRunner().publish(input), /configure.*skill/i);
+  await assert.rejects(new SkillRunner().publish(input), /Publisher input contract/i);
 });
 
 test("Confluence fetch imports the main page and direct same-host pages only", async () => {
@@ -495,8 +617,7 @@ test("Confluence fetch imports the main page and direct same-host pages only", a
         version: { number: 4 },
         body: {
           storage: {
-            value:
-              '<p>Child</p><a href="/wiki/spaces/X/pages/4/Grandchild">Do not follow</a>',
+            value: '<p>Child</p><a href="/wiki/spaces/X/pages/4/Grandchild">Do not follow</a>',
           },
         },
       },
@@ -516,9 +637,7 @@ test("Confluence fetch imports the main page and direct same-host pages only", a
     host: "https://docs.example.test",
     fetch,
   });
-  const result = await adapter.fetch(
-    "https://docs.example.test/wiki/spaces/X/pages/1/Main",
-  );
+  const result = await adapter.fetch("https://docs.example.test/wiki/spaces/X/pages/1/Main");
 
   assert.deepEqual(
     result.sources.map(({ id, version }) => [id, version]),
@@ -531,9 +650,7 @@ test("Confluence fetch imports the main page and direct same-host pages only", a
   assert.match(result.content, /Child/);
   assert.equal(result.warnings.length, 1);
   assert.equal(requested.length, 3);
-  assert.ok(
-    requested.every((url) => new URL(url).host === "docs.example.test"),
-  );
+  assert.ok(requested.every((url) => new URL(url).host === "docs.example.test"));
   await assert.rejects(
     adapter.fetch("https://outside.test/wiki/spaces/X/pages/1/Main"),
     /configured Confluence host/i,
@@ -541,8 +658,7 @@ test("Confluence fetch imports the main page and direct same-host pages only", a
 });
 
 test("Confluence fetch enforces its timeout even when an injected fetch ignores abort", async () => {
-  const fetch = () =>
-    new Promise((resolve) => setTimeout(() => resolve(new Response("{}")), 50));
+  const fetch = () => new Promise((resolve) => setTimeout(() => resolve(new Response("{}")), 50));
   const adapter = new ConfluenceAdapter({
     host: "https://docs.example.test",
     fetch,
@@ -590,8 +706,7 @@ test("Confluence resolves direct storage page references by exact title without 
     version: { number: 1 },
     body: {
       storage: {
-        value:
-          '<ac:link><ri:page ri:content-title="Child &amp; Notes" /></ac:link>',
+        value: '<ac:link><ri:page ri:content-title="Child &amp; Notes" /></ac:link>',
       },
     },
   };
@@ -608,8 +723,7 @@ test("Confluence resolves direct storage page references by exact title without 
   const fetch = async (url) => {
     const parsed = new URL(url);
     requested.push(parsed);
-    if (/\/pages\/1$/.test(parsed.pathname))
-      return new Response(JSON.stringify(main));
+    if (/\/pages\/1$/.test(parsed.pathname)) return new Response(JSON.stringify(main));
     if (
       parsed.pathname.endsWith("/pages") &&
       parsed.searchParams.get("title") === "Child & Notes"
@@ -676,8 +790,7 @@ test("node validation refuses an empty test suite", async (t) => {
 
 test("runtime marks an explicit human question as waiting for input", async () => {
   const runner = async (_file, args, options = {}) => {
-    if (args.includes("--version"))
-      return { code: 0, stdout: "codex 1", stderr: "" };
+    if (args.includes("--version")) return { code: 0, stdout: "codex 1", stderr: "" };
     if (args.includes("--help"))
       return { code: 0, stdout: "--json --sandbox --ephemeral", stderr: "" };
     options.onStdout(
@@ -705,15 +818,12 @@ test("runtime marks an explicit human question as waiting for input", async () =
 test("missing native session falls back once to logical continuation", async () => {
   let attempts = 0;
   const runner = async (_file, args, options = {}) => {
-    if (args.includes("--version"))
-      return { code: 0, stdout: "codex 1", stderr: "" };
+    if (args.includes("--version")) return { code: 0, stdout: "codex 1", stderr: "" };
     if (args.join(" ") === "exec --help")
       return { code: 0, stdout: "--json --sandbox resume", stderr: "" };
-    if (args.includes("--help"))
-      return { code: 0, stdout: "--json --config", stderr: "" };
+    if (args.includes("--help")) return { code: 0, stdout: "--json --config", stderr: "" };
     attempts++;
-    if (args.includes("resume"))
-      return { code: 1, stdout: "", stderr: "Session not found" };
+    if (args.includes("resume")) return { code: 1, stdout: "", stderr: "Session not found" };
     options.onStdout(
       JSON.stringify({
         type: "item.completed",
@@ -751,10 +861,7 @@ test("review fingerprint changes when development advances", async (t) => {
 test("review diff includes files in new directories", async (t) => {
   const repo = await repositoryFixture(t);
   await mkdir(path.join(repo, "new-module"));
-  await writeFile(
-    path.join(repo, "new-module", "index.js"),
-    "export const answer = 42;\n",
-  );
+  await writeFile(path.join(repo, "new-module", "index.js"), "export const answer = 42;\n");
   const { git: adapter } = await createAdapters();
   assert.match((await adapter.inspect(repo)).diff, /export const answer = 42/);
 });
@@ -842,10 +949,7 @@ test("reviewer requests are validated and verified with GitHub", async () => {
       };
     },
   });
-  await assert.rejects(
-    provider.requestReview({ reviewers: ["--help"] }),
-    /usernames/,
-  );
+  await assert.rejects(provider.requestReview({ reviewers: ["--help"] }), /usernames/);
   assert.equal(calls.length, 0);
   await provider.requestReview({
     path: process.cwd(),
@@ -874,20 +978,15 @@ test("Google Chat retries retain request IDs and never disclose webhook credenti
     fetch: async (url, options) => {
       calls.push({ url: new URL(url), options });
       if (calls.length === 1) throw new Error("secret-token");
-      return new Response(
-        JSON.stringify({ name: "spaces/test/messages/receipt" }),
-        {
-          status: 200,
-        },
-      );
+      return new Response(JSON.stringify({ name: "spaces/test/messages/receipt" }), {
+        status: 200,
+      });
     },
   });
   const input = { text: "Review PR", requestId: "stable-request" };
   await assert.rejects(
     adapter.send(input),
-    (error) =>
-      !error.message.includes("secret-token") &&
-      /not confirmed/.test(error.message),
+    (error) => !error.message.includes("secret-token") && /not confirmed/.test(error.message),
   );
   assert.deepEqual(await adapter.send(input), {
     name: "spaces/test/messages/receipt",
@@ -907,10 +1006,13 @@ test("test credentials reach child processes but not test summaries or model out
   process.env[name] = "test-credential-value";
   t.after(() => delete process.env[name]);
   const runner = async (_file, args, options = {}) => {
-    if (args.includes("--version"))
-      return { code: 0, stdout: "codex 1", stderr: "" };
+    if (args.includes("--version")) return { code: 0, stdout: "codex 1", stderr: "" };
     if (args.includes("--help"))
-      return { code: 0, stdout: "--json --sandbox --ephemeral", stderr: "" };
+      return {
+        code: 0,
+        stdout: "--json --sandbox --ephemeral --model --config",
+        stderr: "",
+      };
     assert.equal(options.env[name], "test-credential-value");
     options.onStdout?.(
       JSON.stringify({
@@ -927,6 +1029,18 @@ test("test credentials reach child processes but not test summaries or model out
   const adapters = await createAdapters({
     runner,
     testing: { credentialEnv: [name] },
+    orchestration: {
+      models: [
+        {
+          id: "gpt-6.1-sol",
+          runtime: "codex",
+          family: "gpt",
+          verified: true,
+          available: true,
+          efforts: ["high"],
+        },
+      ],
+    },
   });
   const result = await adapters.git.test(process.cwd(), "node-test");
   assert.equal(result.passed, true);
@@ -937,10 +1051,7 @@ test("test credentials reach child processes but not test summaries or model out
     prompt: "test",
     onEvent: (event) => events.push(event),
   });
-  assert.doesNotMatch(
-    JSON.stringify({ turn, events }),
-    /test-credential-value/,
-  );
+  assert.doesNotMatch(JSON.stringify({ turn, events }), /test-credential-value/);
 });
 
 test("local skill paths and appendix bridge retain the approved plan contract", async (t) => {
@@ -961,10 +1072,7 @@ test("local skill paths and appendix bridge retain the approved plan contract", 
       };
     },
   });
-  assert.match(
-    await adapters.workflow.instructions("commit"),
-    /Use office format/,
-  );
+  assert.match(await adapters.workflow.instructions("commit"), /Use office format/);
   assert.match(await adapters.workflow.instructions("commit"), /Do not commit/);
   assert.equal(
     await adapters.skill.appendix({ planPath: "approved-plan.md" }),
@@ -981,7 +1089,7 @@ test("direct local Jira skills isolate the configured MCP server and preserve pa
   const mcpConfigPath = path.join(dir, "claude.json");
   await writeFile(
     file,
-    "# Upload tasks\nCreate one sample, then batches of five.",
+    "---\nname: upload-task-to-jira\n---\n# Upload tasks\nCreate one sample, then batches of five.",
   );
   await writeFile(
     mcpConfigPath,
@@ -992,49 +1100,101 @@ test("direct local Jira skills isolate the configured MCP server and preserve pa
       },
     }),
   );
-  let copied;
+  const appendixContent = await readFile(new URL("./fixtures/jira-appendix.md", import.meta.url), "utf8");
+  const appendixPath = path.join(dir, "appendix.md");
+  await writeFile(appendixPath, appendixContent);
+  let copied, calls = 0, readBackMode = "key";
   const runtime = {
     start: async (input) => {
       copied = input.mcpConfig;
       const config = JSON.parse(
-        await import("node:fs/promises").then(({ readFile }) =>
-          readFile(copied, "utf8"),
-        ),
+        await import("node:fs/promises").then(({ readFile }) => readFile(copied, "utf8")),
       );
       assert.deepEqual(Object.keys(config.mcpServers), ["atlassian"]);
-      assert.ok(input.mcpTools.includes("mcp__atlassian__createJiraIssue"));
+      calls++;
+      const verification = false;
+      assert.equal(input.mcpTools.includes("mcp__atlassian__createJiraIssue"), !verification);
       assert.ok(!input.mcpTools.some((tool) => /delete|edit/i.test(tool)));
-      assert.match(input.prompt, /Create at most maxIssues/);
-      assert.doesNotMatch(input.prompt, /https:\/\/jira.example/);
+      if (!verification) assert.match(input.prompt, /at most maxIssues/);
+      if (!verification) {
+        assert.match(input.prompt, /appendixTaskMapping/);
+        assert.match(input.prompt, /appendixIdempotencyPrefix/);
+        assert.match(input.prompt, /publicationManifest/);
+        assert.match(input.prompt, /existingIssues/);
+        assert.deepEqual(input.mcpGuard.taskIds, ["T1.1"]);
+        assert.equal(input.mcpGuard.issueMarkers["T1.1"], "devquest:q:appendix:T1.1");
+      }
+      input.onEvent({ type: "native-skill" });
+      assert.ok(input.prompt.includes(JSON.stringify(appendixContent)));
+      assert.equal(input.readOnly, true);
+      assert.equal(input.nativeSkill, "devquest-jira:upload-task-to-jira");
+      assert.doesNotMatch(input.prompt, /https:\/\/other.example/);
+      if (verification) { for (const event of jiraEvidence("FFE")) input.onEvent(event); return { text: '{"prepared":true}' }; }
+      if (readBackMode !== "missing") input.onEvent({ type: "jira-read", method: "getJiraIssue", input: { issueIdOrKey: readBackMode === "numeric" ? "12345" : "FFE-1" }, content: { key: "FFE-1", fields: { project: { key: "FFE" }, description: "devquest:q:appendix:T1.1" } } });
       return {
-        text: JSON.stringify({
+        text: "Sample created and verified.\n\n```json\n" + JSON.stringify({
           results: [
             {
               taskId: "task-a",
+              appendixTaskId: "T1.1",
               key: "FFE-1",
               url: "https://jira.example/FFE-1",
             },
-            { taskId: "outside-scope", key: "FFE-2", complete: true },
           ],
-        }),
+        }) + "\n```\nReview before another batch.",
       };
     },
   };
   const skill = new SkillRunner({ runtime, mcpConfigPath });
-  const result = await skill.publish({
-    quest: { id: "q" },
+  const result = await skill.publish(readyPublisherInput({
+    quest: { id: "q", jiraContext: { project: "FFE", epic: "FFE-1", assignee: "synthetic" } },
     tasks: [{ id: "task-a" }],
     planPath: path.join(dir, "plan.md"),
+    appendixPath,
+    appendixContent,
     skillPaths: { upload: file },
     maxIssues: 1,
     publicationPhase: "sample",
-  });
+  }));
   assert.equal(result.length, 1);
   assert.equal(result[0].complete, false);
   await assert.rejects(
     import("node:fs/promises").then(({ stat }) => stat(copied)),
     /ENOENT/,
   );
+  const scoped = readyPublisherInput({
+    quest: {id:"q",jiraContext:{project:"FFE",siteUrl:"https://jira.example",epic:"FFE-1",assignee:"synthetic"}},
+    tasks:[{id:"task-a"}],appendixPath,appendixContent,skillPaths:{upload:file},maxIssues:1,
+  });
+  scoped.publicationManifest.search.visibilityVerified=false;
+  scoped.publicationManifest.visibilityScope="account-visible";
+  let dispatched=0;const forwarded=[];
+  scoped.onDispatch=()=>dispatched++;
+  scoped.onEvent=event=>forwarded.push(event.type);
+  await assert.rejects(skill.publish(scoped),error=>error.publisherNotStarted===true);
+  assert.equal(dispatched,0);
+  scoped.quest.jiraSearchScopeAcceptance={scope:"account-visible",artifactId:scoped.appendixArtifactId,
+    artifactHash:scoped.appendixHash,project:"FFE",siteUrl:"https://jira.example",epic:"FFE-1"};
+  assert.equal((await skill.publish(scoped)).length,1);
+  assert.equal(dispatched,1);assert.ok(forwarded.includes("native-skill"));assert.ok(forwarded.includes("jira-read"));
+  readBackMode = "numeric";
+  assert.equal((await skill.publish(scoped)).length, 1, "numeric Jira ID read-back still verifies the returned key");
+  readBackMode = "missing";
+  let readOnlyChecks = 0, description = "devquest:q:appendix:T1.1";
+  skill.preflightPublication = async () => {
+    readOnlyChecks++;
+    return {cloudId:scoped.publicationManifest.cloudId,projectId:scoped.publicationManifest.projectId,
+      siteUrl:scoped.publicationManifest.siteUrl,searchPages:[{isLast:true,issues:[{key:"FFE-1",
+        fields:{project:{key:"FFE"},description}}]}]};
+  };
+  assert.equal((await skill.publish(scoped)).length, 1);
+  assert.equal(readOnlyChecks, 1);
+  assert.ok(forwarded.includes("publication-verification"));
+  description = "devquest:q:appendix:T1.10";
+  await assert.rejects(skill.publish(scoped), /unconfirmed issue key\/marker after read-only reconciliation/);
+  skill.preflightPublication = async () => {throw new Error("Read-only Jira verification unavailable");};
+  await assert.rejects(skill.publish(scoped), /Read-only Jira verification unavailable/);
+
   skill.close();
   await assert.rejects(
     skill.appendix({
@@ -1056,10 +1216,7 @@ test("Claude Jira skill mode allows only named MCP tools and denies other permis
   assert.equal(args[args.indexOf("--permission-mode") + 1], "dontAsk");
   assert.equal(args[args.indexOf("--tools") + 1], "Read");
   assert.equal(args[args.indexOf("--mcp-config") + 1], "/private/mcp.json");
-  assert.equal(
-    args[args.indexOf("--allowedTools") + 1],
-    "Read,mcp__atlassian__createJiraIssue",
-  );
+  assert.equal(args[args.indexOf("--allowedTools") + 1], "Read,mcp__atlassian__createJiraIssue");
   assert.ok(args.includes("--no-session-persistence"));
 });
 
@@ -1079,4 +1236,347 @@ test("a missing working directory is reported before spawning an installed CLI",
     runProcess(process.execPath, ["--version"], { cwd }),
     /Working directory is unavailable/,
   );
+});
+
+test("restricted Codex continuation reapplies policy in a fresh checkpoint session", async () => {
+  let invocation;
+  const runtime = new CodexRuntime({
+    persistence: true,
+    runner: async (_file, args, options) => {
+      invocation = { args, options };
+      options.onStdout(
+        JSON.stringify({
+          type: "item.completed",
+          item: { type: "agent_message", text: "Continued safely" },
+        }) + "\n",
+      );
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  runtime.detectCapabilities = async () => ({
+    available: true,
+    nativeResume: true,
+    modelSelection: true,
+    effortSelection: true,
+    nestedRestriction: true,
+  });
+  await runtime.resume({
+    cwd: process.cwd(),
+    sessionId: "old-thread",
+    prompt: "Continue from saved checkpoint",
+    bootstrap: "Required instructions",
+    route: { resolvedModel: "gpt-5.4", resolvedEffort: "high" },
+    executionPolicy: { nestedSpawning: false },
+  });
+  assert.ok(!invocation.args.includes("resume"));
+  assert.ok(!invocation.args.includes("old-thread"));
+  assert.ok(invocation.args.includes("gpt-5.4"));
+  for (const feature of ["multi_agent", "multi_agent_v2", "shell_tool", "unified_exec"])
+    assert.ok(invocation.args.includes(feature));
+  assert.match(invocation.options.input, /^Required instructions\nContinue from saved checkpoint/);
+});
+
+test("Claude integration skills retain the routed model allowlist without worker policy", () => {
+  const runtime = new ClaudeCodeRuntime();
+  runtime.help = "--permission-mode --settings --model --effort";
+  const args = runtime.buildArgs({
+    readOnly: true,
+    route: { resolvedModel: "claude-sonnet-5-5", resolvedEffort: "high" },
+    mcpConfig: '{"mcpServers":{}}',
+    mcpTools: ["mcp__jira__create"],
+  });
+  assert.deepEqual(JSON.parse(args[args.indexOf("--settings") + 1]), {
+    availableModels: ["claude-sonnet-5-5"],
+  });
+  assert.ok(args.includes("Read,mcp__jira__create"));
+});
+
+test("managed Claude appendix exposes only its native skill and read-only metadata tools, records actual Skill results", async () => {
+  const events = [];
+  let invocation;
+  const runtime = new ClaudeCodeRuntime({
+    runner: async (_file, args, options) => {
+      invocation = { args, options };
+      options.onSpawn?.(1234);
+      for (const event of [
+        {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                id: "skill-1",
+                name: "Skill",
+                input: { skill: "devquest-jira:create-appendix-task-list" },
+              },
+            ],
+          },
+        },
+        {
+          type: "user",
+          message: {
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "skill-1",
+                content: "Skill loaded",
+              },
+            ],
+          },
+        },
+        { type: "assistant", message: { content: [{ type: "tool_use", id: "metadata-1", name: "mcp__atlassian__getJiraIssueTypeMetaWithFields", input: { projectIdOrKey: "SYN" } }] } },
+        { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "metadata-1", content: [{ type: "text", text: JSON.stringify({ customfield_11543: { allowedValues: [{ id: "11515", value: "Refactor or add 1 generic function" }] } }) }] }] } },
+        {
+          type: "result",
+          result: '{"content":"synthetic only"}',
+          session_id: "fixture-session",
+        },
+      ])
+        options.onStdout(JSON.stringify(event) + "\n");
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  runtime.help =
+    "--restricted --disallowedTools --disable-slash-commands --permission-mode --plugin-dir";
+  runtime.detectCapabilities = async () => ({
+    available: true,
+    modelSelection: true,
+    effortSelection: true,
+    nativeResume: false,
+  });
+  await runtime.start({
+    cwd: process.cwd(),
+    readOnly: true,
+    nativeSkill: "devquest-jira:create-appendix-task-list",
+    skillPluginDir: "/tmp/approved-plugin",
+    mcpConfig: "fixture.json",
+    mcpTools: ["mcp__atlassian__getJiraIssue"],
+    executionPolicy: { nestedSpawning: false },
+    route: { resolvedModel: "claude-sonnet-test", resolvedEffort: "low" },
+    timeoutMs: 60000,
+    onEvent: (e) => events.push(e),
+    prompt: "Synthetic task",
+  });
+  const args = invocation.args;
+  assert.equal(args[args.indexOf("--tools") + 1], "Read,Skill");
+  assert.equal(
+    args[args.indexOf("--allowedTools") + 1],
+    "Read,Skill(devquest-jira:create-appendix-task-list),mcp__atlassian__getJiraIssue",
+  );
+  assert.ok(args.includes("--restricted"));
+  assert.match(args[args.indexOf("--disallowedTools") + 1], /Bash.*Edit,Write/);
+  assert.ok(!args.includes("--disable-slash-commands"));
+  assert.ok(events.some((e) => e.type === "native-skill"));
+  assert.ok(events.some((e) => e.type === "heartbeat"));
+  assert.equal(invocation.options.timeoutMs, 60000);
+  assert.deepEqual(events.find((e) => e.type === "appendix-metadata"), { type: "appendix-metadata", project: "SYN", options: [{ id: "11515", value: "Refactor or add 1 generic function" }] });
+});
+
+test("missing native appendix skill fails before spawning any runtime", async () => {
+  const skill = new SkillRunner();
+  await assert.rejects(
+    skill.prepareAppendix({ skillPaths: {} }),
+    /Install.*create-appendix-task-list/,
+  );
+  await assert.rejects(
+    skill.prepareAppendix({
+      skillPaths: { appendix: "/missing/skill/SKILL.md" },
+    }),
+    /missing or unreadable/,
+  );
+});
+
+test("per-run appendix asset contains only the unchanged approved skill and keeps live Jira field requirements", async (t) => {
+  const { readFile, readdir, stat } = await import("node:fs/promises");
+  const dir = await mkdtemp(path.join(tmpdir(), "devquest skill asset "));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "SKILL.md"),
+    config = path.join(dir, "mcp.json");
+  const original =
+    "---\nname: create-appendix-task-list\ndescription: Synthetic approved contract\n---\n# Approved skill\nUse live categories only.\n";
+  await writeFile(file, original);
+  await writeFile(
+    config,
+    JSON.stringify({
+      mcpServers: {
+        atlassian: { type: "http", url: "https://synthetic.invalid/mcp" },
+      },
+    }),
+  );
+  const prepared = await new SkillRunner({
+    mcpConfigPath: config,
+  }).prepareAppendix({
+    skillPaths: { appendix: file },
+    quest: { jiraContext: { project: "FCAD", epic: "FCAD-6205" } },
+    planContent: "# Approved plan",
+    trdContent: "# Rationale only",
+  });
+  t.after(prepared.cleanup);
+  assert.equal(prepared.nativeSkill, "devquest-jira:create-appendix-task-list");
+  assert.deepEqual(
+    (await readdir(prepared.skillPluginDir, { recursive: true })).sort(),
+    [
+      ".claude-plugin",
+      ".claude-plugin/plugin.json",
+      "skills",
+      "skills/create-appendix-task-list",
+      "skills/create-appendix-task-list/SKILL.md",
+    ].sort(),
+  );
+  assert.equal(
+    await readFile(
+      path.join(prepared.skillPluginDir, "skills/create-appendix-task-list/SKILL.md"),
+      "utf8",
+    ),
+    original,
+  );
+  assert.equal(await readFile(file, "utf8"), original);
+  assert.equal(
+    JSON.parse(
+      await readFile(path.join(prepared.skillPluginDir, ".claude-plugin/plugin.json"), "utf8"),
+    ).name,
+    "devquest-jira",
+  );
+  assert.match(prepared.skillHash, /^[a-f0-9]{64}$/);
+  assert.match(prepared.prompt, /skill="devquest-jira:create-appendix-task-list"/);
+  assert.match(prepared.prompt, /customfield_11543/);
+  assert.match(prepared.prompt, /never invent categories/);
+  assert.match(prepared.prompt, /matching saved weight reference/);
+  assert.ok(!prepared.prompt.includes(original));
+  assert.ok(!prepared.mcpTools.some((tool) => /create|update|delete/i.test(tool)));
+  assert.equal((await stat(prepared.skillPluginDir)).mode & 0o077, 0);
+  await prepared.cleanup();
+  await assert.rejects(stat(prepared.skillPluginDir), /ENOENT/);
+  await writeFile(file, original.replace("description:", "context: fork\ndescription:"));
+  await assert.rejects(
+    new SkillRunner({ mcpConfigPath: config }).prepareAppendix({
+      skillPaths: { appendix: file },
+    }),
+    /incompatible/,
+  );
+});
+
+test("native appendix fails closed when safe mode disables skills or explicit asset support is missing", async () => {
+  const runtime = new ClaudeCodeRuntime({
+    env: { CLAUDE_CODE_SAFE_MODE: "1" },
+    runner: async () => {
+      throw new Error("Must not spawn");
+    },
+  });
+  await assert.rejects(
+    runtime.start({ nativeSkill: "devquest-jira:create-appendix-task-list" }),
+    /safe mode disables native skills/,
+  );
+  const adapter = new ClaudeCodeRuntime();
+  adapter.help = "--restricted --disallowedTools --disable-slash-commands --permission-mode";
+  assert.throws(
+    () =>
+      adapter.buildArgs({
+        readOnly: true,
+        nativeSkill: "devquest-jira:create-appendix-task-list",
+        skillPluginDir: "/tmp/approved-plugin",
+        mcpConfig: "fixture",
+        mcpTools: [],
+        executionPolicy: {},
+      }),
+    /per-session skill loading/,
+  );
+});
+
+test("appendix metadata paths use the canonical controlled directory, including spaces and symlinks", async t => {
+  const dir = await mkdtemp(path.join(tmpdir(), "devquest-metadata-path-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const target = path.join(dir, "approved inputs"), alias = path.join(dir, "input alias");
+  await mkdir(target);
+  await symlink(target, alias, "junction");
+  const prepared = { inputDirectory: alias, prompt: "Fixture only" };
+  const proof = { project: "SYN", checkedAt: "2026-10-18", selectedOptions: [{ id: "1", value: "BE synthetic", points: 1 }] };
+  await SkillRunner.prototype.attachAppendixMetadata(prepared, proof, { hash: "snapshot" });
+  assert.equal(prepared.inputDirectory, await realpath(target));
+  assert.equal(prepared.appendixMetadata.file, path.join(await realpath(target), "appendix-options.json"));
+  assert.deepEqual(JSON.parse(await readFile(prepared.appendixMetadata.file, "utf8")).options, proof.selectedOptions);
+});
+
+test("native metadata read evidence verifies actual returned file lines; claims, partial and stale contents cannot count as a full read", async t => {
+  const { createHash } = await import("node:crypto");
+  const dir = await mkdtemp(path.join(tmpdir(), "devquest-read-evidence-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "appendix-options.json"), content = JSON.stringify({ options: [{ id: "1", value: "BE synthetic", points: 1 }] }, null, 2);
+  await writeFile(file, content);
+  const contract = { file, hash: createHash("sha256").update(content).digest("hex"), lineCount: content.split("\n").length };
+  const events = [];
+  const runtime = new ClaudeCodeRuntime({ runner: async (_file, _args, options) => {
+    for (const [id, name, target, text] of [
+      ["full", "Read", file, content.split("\n").map((line,i) => `${i+1}→${line}`).join("\n")],
+      ["tabbed", "Read", file, content.split("\n").map((line,i) => `${i+1}\t${line}`).join("\n")],
+      ["partial", "Read", file, "1→{"],
+      ["claim", "Read", file, "I read all verified metadata"],
+      ["stale", "Read", file, "1→changed"],
+      ["other", "Read", path.join(dir,"other.json"), content],
+    ]) {
+      options.onStdout(JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id, name, input: { file_path: target } }] } }) + "\n");
+      options.onStdout(JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: [{ type: "text", text }] }] } }) + "\n");
+    }
+    options.onStdout(JSON.stringify({ type: "result", result: "Fixture only" }) + "\n");
+    return { code: 0, stdout: "", stderr: "" };
+  } });
+  runtime.help = "--restricted --disallowedTools --disable-slash-commands --permission-mode --plugin-dir";
+  runtime.detectCapabilities = async () => ({ available: true, modelSelection: true, effortSelection: true });
+  await runtime.start({ cwd: dir, readOnly: true, accessScope: { cwd: dir, readOnly: true, repositories: [{ id: "inputs", name: "Approved inputs", path: dir }] }, appendixMetadata: contract, nativeSkill: "devquest-jira:create-appendix-task-list", skillPluginDir: path.join(dir,"plugin"), mcpConfig: "fixture.json", mcpTools: [], executionPolicy: { nestedSpawning: false }, route: { resolvedModel: "claude-sonnet-test", resolvedEffort: "medium" }, onEvent: event => events.push(event) });
+  const proof = events.filter(e => e.type === "appendix-metadata-read");
+  assert.equal(proof.length, 5);
+  assert.deepEqual(proof.find(e => e.toolUseId === "full").ranges, [[1, contract.lineCount]]);
+  assert.deepEqual(proof.find(e => e.toolUseId === "tabbed").ranges, [[1, contract.lineCount]]);
+  assert.deepEqual(proof.find(e => e.toolUseId === "partial").ranges, [[1,1]]);
+  assert.deepEqual(proof.find(e => e.toolUseId === "claim").ranges, []);
+  assert.deepEqual(proof.find(e => e.toolUseId === "stale").ranges, []);
+  assert.ok(proof.every(e => e.hash === contract.hash));
+});
+
+
+test("publisher decodes the actual prose and fenced result without accepting ambiguous output", async () => {
+  const text = await readFile(new URL("./fixtures/jira-publisher-prose-result.txt", import.meta.url), "utf8");
+  const parsed = parsePublisherResponse(text);
+  assert.equal(parsed.results[0].key, "FCAD-6297");
+  assert.equal(parsed.results[0].appendixTaskId, "T1.1");
+  assert.deepEqual(parsePublisherResponse(JSON.stringify(parsed)), parsed);
+  assert.throws(() => parsePublisherResponse(text + "\n```json\n{}\n```"), /unambiguous/);
+  assert.throws(() => parsePublisherResponse("Created FCAD-6297"), /unambiguous/);
+  assert.throws(() => parsePublisherResponse("```json\n{broken}\n```"), /invalid/);
+});
+
+test("model-free Jira verification never inherits the paid publisher profile or route", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "devquest-verify-profile-"));
+  t.after(() => rm(dir, {recursive:true,force:true}));
+  const file=path.join(dir,'SKILL.md'),config=path.join(dir,'mcp.json');
+  await writeFile(file,'---\nname: upload-task-to-jira\ndescription: Synthetic skill\n---\n# Publish approved input');
+  await writeFile(config,JSON.stringify({mcpServers:{atlassian:{type:'http',url:'https://synthetic.invalid/mcp'}}}));
+  const skill=new SkillRunner({mcpConfigPath:config});
+  const appendixContent=await readFile(new URL('./fixtures/jira-appendix.md',import.meta.url),'utf8');
+  const context={prompt:'Publisher Soul only',snapshot:{route:{resolvedModel:'claude-sonnet-5-5',resolvedEffort:'high'}},hash:'synthetic'};
+  for (const kind of ['upload','verify']) {
+    const prepared=await skill.prepareAppendix({skillPaths:{upload:file},quest:{jiraContext:{project:'FCAD',epic:'FCAD-6205'}},appendixContent,agentProfileContext:context},kind);
+    try {
+      if(kind==='verify') {
+        assert.equal(prepared.profileSnapshot,undefined);
+        assert.equal(prepared.profileSnapshotHash,undefined);
+        assert.equal(prepared.route,undefined);
+        assert.doesNotMatch(prepared.prompt,/Publisher Soul only/);
+        assert.equal(prepared.mcpGuard.stage,'verify');
+        assert.ok(!prepared.mcpTools.some(tool=>/create|update|delete|transition/i.test(tool)));
+      } else {
+        assert.deepEqual(prepared.profileSnapshot,context.snapshot);
+        assert.deepEqual(prepared.route,context.snapshot.route);
+        assert.equal(prepared.profileSnapshotHash,context.hash);
+      }
+    } finally {await prepared.cleanup();}
+  }
+});
+
+test('Bitbucket PR attempts fail before GitHub commands or pushes',async()=>{
+ let calls=0;
+ const provider=new GitHubProvider({runner:async()=>{calls++;throw Error('must not execute')}});
+ await assert.rejects(provider.create({remote:'git@bitbucket.org:team/repo.git'}),/hosted on Bitbucket/);
+ await assert.rejects(provider.create({remote:'https://bitbucket.org/team/repo.git'}),/hosted on Bitbucket/);
+ assert.equal(calls,0);
 });
