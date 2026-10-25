@@ -1,0 +1,16 @@
+# v1.2.1 runtime integration plan
+
+Implementation scope approved by the v1.2.1 request. Existing unpublished work is retained.
+
+Reuse Engine.launch for normal/design/task/review/Jira-generation runs, Orchestration.launch for routing, DesignStages for stage/output contracts, Store JSON rows for persistence, existing scoped readers/runtime flags for capabilities, and SkillRunner's session plugin/MCP controls for Jira. No scheduler, routing v2, publishing-readiness or installed-skill changes.
+
+1. Load only six fixed agents/*.md paths; validate their existing flat scalar YAML schema, nineteen sections, devquest-* IDs and semver. Markdown is canonical. Hash full definitions; compose only behavioral sections, excluding proposed routing/capability prescriptions.
+2. Add an opt-in Quest agentProfiles setting with exact version/hash pins. Existing rows remain absent/legacy. An authenticated idle-only action adopts a reviewed current set; fresh runs reject changed pins until explicit re-adoption. Running runs never adopt new files.
+3. At launch compose identity/Soul, existing stage/output contract, authorized repository standards and the existing stage-specific request. Do not reinterpret prose as policy. Snapshot profile/Soul, current route, stage, permissions, input hashes, standards provenance and relevant skill hashes before dispatch. Both adapters consume the same composed context and validate snapshot policy without selecting models.
+4. Read only root CLAUDE.md and AGENTS.md in already authorized roots, bounded and canonicalized; record missing files explicitly. Never discover parent directories or follow escaping symlinks. Keep each repository's provenance separate; task standards come from its assigned worktree, review standards from integrated workspaces.
+5. Keep the logical run ID for continuation, create separate runs rows as immutable execution attempts with root/predecessor lineage. Preserve original snapshot and routing; rebuild and compare current grants/artifact/standard/skill hashes before continuation. Use fresh runtime sessions to avoid cross-stage/native history contamination. Historical runs without snapshots keep legacy continuation behavior and display LEGACY/UNKNOWN.
+6. Extend the existing AgentRun card with compact provenance and expose explicit adoption without redesigning pages. Add focused registry/composition/immutability/recovery tests and synthetic workflow E2E, then the full regression suite.
+
+Compatibility resolutions: the proposal's illustrative JSON profiles are superseded by the already reviewed Markdown definitions. Actual IDs are devquest-<role>, not the example's developer. Existing JSON tables need additive fields, not a destructive SQL migration. Jira retains Planner routing inheritance. Existing fresh design retries may retain separate run IDs as attempts; lineage ties them to the original identity. Publishing uses an existing operation rather than an AgentRun; record profile context there without changing its lifecycle/gates.
+
+Security: snapshots are evidence, never reusable grants. Profile/standards changes cannot grant tools or choose models. Unsupported mappings/versions/capabilities fail closed. No credentials/environment dumps or private repository source copies enter snapshots. No live data migration, paid calls, Jira mutations, commits or PRs during implementation.

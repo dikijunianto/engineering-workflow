@@ -1,0 +1,58 @@
+{
+  "desktop": {
+    "performance": {
+      "assets": [
+        {
+          "bytes": 38554,
+          "ms": 15.599999994039536,
+          "name": "/style.css"
+        },
+        {
+          "bytes": 58569,
+          "ms": 16.599999994039536,
+          "name": "/dashboard.css"
+        },
+        {
+          "bytes": 873873,
+          "ms": 17.900000005960464,
+          "name": "/preview.js"
+        }
+      ],
+      "callbackP95ms": 3.2000000178813934,
+      "frames": 216,
+      "loadMs": 389.5,
+      "longTasks": [
+        180,
+        75,
+        79
+      ],
+      "maxFrameGap": 82.29999999999563,
+      "reduced": false,
+      "viewport": [
+        1280,
+        720
+      ]
+    },
+    "scene": {
+      "calls": 384,
+      "frames": 204,
+      "geometries": 71,
+      "loadMs": 109.4,
+      "meanSubmitMs": 1.18,
+      "textures": 29,
+      "triangles": 107452
+    }
+  },
+  "reduced": {
+    "phase": "Static handoff · human approval still required",
+    "scene": {
+      "calls": 167,
+      "frames": 5,
+      "geometries": 42,
+      "loadMs": 107.4,
+      "meanSubmitMs": 12.28,
+      "textures": 18,
+      "triangles": 46822
+    }
+  }
+}

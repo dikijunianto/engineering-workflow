@@ -1,0 +1,20 @@
+{
+  "start": {
+    "calls": 167,
+    "frames": 1064,
+    "geometries": 72,
+    "loadMs": 167,
+    "meanSubmitMs": 0.67,
+    "textures": 29,
+    "triangles": 46822
+  },
+  "end": {
+    "calls": 167,
+    "frames": 1064,
+    "geometries": 72,
+    "loadMs": 167,
+    "meanSubmitMs": 0.67,
+    "textures": 29,
+    "triangles": 46822
+  }
+}

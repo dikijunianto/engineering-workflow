@@ -1,0 +1,54 @@
+{
+  "verifiedAt": "2026-10-15T06:49:24.545099+00:00",
+  "runtime": "Claude Code",
+  "version": "2.1.300",
+  "authentication": {
+    "loggedIn": true,
+    "method": "claude.ai",
+    "provider": "firstParty",
+    "subscription": "team"
+  },
+  "method": "SDK initialize control only; no user prompt or inference",
+  "permissionMode": "auto",
+  "models": [
+    {
+      "id": "claude-haiku-5-5",
+      "runtime": "claude",
+      "family": "haiku",
+      "available": true,
+      "verified": true,
+      "efforts": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "runtime": "claude",
+      "family": "sonnet",
+      "available": true,
+      "verified": true,
+      "efforts": ["low", "medium", "high", "xhigh", "max"]
+    },
+    {
+      "id": "claude-opus-5-5",
+      "runtime": "claude",
+      "family": "opus",
+      "available": true,
+      "verified": true,
+      "efforts": ["low", "medium", "high", "xhigh", "max"]
+    }
+  ],
+  "organizationPolicy": "No local managed settings file found; effective runtime catalog lists all three models and effort levels. Remote policy can change.",
+  "paidSmokeTest": "NOT_RUN: user declined paid invocation",
+  "fallbacks": {
+    "haiku": ["claude-sonnet-5-5", "claude-opus-5-5"],
+    "sonnet": ["claude-opus-5-5"],
+    "opus": []
+  },
+  "initializationSmoke": {
+    "status": "PASSED",
+    "requestedModel": "claude-opus-5-5",
+    "requestedEffort": "high",
+    "permissionMode": "auto",
+    "namedModels": ["claude-opus-5-5"],
+    "inferenceSubmitted": false
+  }
+}

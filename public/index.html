@@ -3,90 +3,61 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#06101f" />
+    <meta name="theme-color" content="#09090b" />
     <title>DevQuest — Engineering workspace</title>
     <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/dashboard.css" />
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to workspace content</a>
     <aside class="sidebar">
       <a href="#home" class="brand"
-        ><span class="brandmark" data-icon="sword" aria-hidden="true"></span
-        >DevQuest<span class="version">v1</span></a
+        ><span class="brandmark" data-icon="sword" aria-hidden="true"></span>DevQuest</a
       >
-      <div class="workspace">
-        <span
-          class="workspace-icon"
-          data-icon="layers"
-          aria-hidden="true"
-        ></span>
-        <div>
-          Engineering workspace<small>Personal · Local environment</small>
-        </div>
-      </div>
-      <div class="nav-label">WORKSPACE</div>
-      <nav aria-label="Main navigation">
+      <button id="navigation-toggle" class="btn mobile-nav-trigger" type="button" data-action="toggle-navigation" aria-controls="primary-navigation" aria-expanded="false" aria-label="Navigation"><span data-icon="menu" aria-hidden="true"></span><span class="nav-trigger-label">Menu</span></button>
+      <div id="sidebar-content">
+      <nav id="primary-navigation" aria-label="Main navigation">
         <a href="#home" data-nav="home"
           ><span data-icon="home" aria-hidden="true"></span>Overview</a
         >
         <a href="#quests" data-nav="quests"
-          ><span data-icon="quest" aria-hidden="true"></span>Quests<span
+          ><span data-icon="quest" aria-hidden="true"></span>Projects<span
             id="quest-count"
             class="nav-count"
             >0</span
           ></a
         >
         <a href="#repositories" data-nav="repositories"
-          ><span data-icon="repository" aria-hidden="true"></span
-          >Repositories</a
+          ><span data-icon="repository" aria-hidden="true"></span>Repositories<span id="repository-count" class="nav-count">0</span></a
         >
         <a href="#agents" data-nav="agents"
-          ><span data-icon="party" aria-hidden="true"></span>Agent party</a
+          ><span data-icon="party" aria-hidden="true"></span>Agents</a
+        >
+        <a href="#skills" data-nav="skills"
+          ><span data-icon="spark" aria-hidden="true"></span>Skills</a
         >
         <a href="#jira" data-nav="jira"
           ><span data-icon="jira" aria-hidden="true"></span>Jira tasks</a
         >
+        <a href="#settings" data-nav="settings" class="nav-settings"><span data-icon="settings" aria-hidden="true"></span>Settings</a>
       </nav>
-      <div id="sidebar-sprint" class="sidebar-sprint"></div>
-      <div class="sidebar-bottom">
-        <div class="local-note">
-          <i></i>Workflow stored locally<small
-            >Your machine. Your workflow.</small
-          >
-        </div>
-        <a href="#settings" data-nav="settings"
-          ><span data-icon="settings" aria-hidden="true"></span
-          ><span>Settings & integrations</span></a
-        >
-        <div class="profile">
-          <span>Y</span>
-          <div>Your workspace<small>Engineer</small></div>
-          <span class="online">●</span>
-        </div>
       </div>
+      <div id="sidebar-sprint" class="sidebar-sprint"></div>
     </aside>
     <div class="shell">
       <header class="topbar">
-        <div class="breadcrumb">
-          <span data-icon="layers" aria-hidden="true"></span> Workspace
-          <span>›</span> <strong id="breadcrumb">Overview</strong>
-        </div>
-        <div class="top-right">
-          <span class="local-tag"><i></i>LOCAL</span
-          ><span class="separator"></span><span class="date" id="today"></span>
-        </div>
+        <nav class="breadcrumb" aria-label="Breadcrumb">
+          <a href="#home">Workspace</a> <span aria-hidden="true">/</span>
+          <strong id="breadcrumb" aria-current="page">Overview</strong>
+        </nav>
+        <div id="dashboard-header"></div>
       </header>
       <main id="main" tabindex="-1">
         <div class="loading">Loading your workspace…</div>
       </main>
-      <footer>
-        Built for the work between an idea and a pull request.<span
-          >DevQuest · Local first</span
-        >
-      </footer>
     </div>
     <div id="toast" role="status" aria-live="polite" hidden></div>
-    <dialog id="dialog"><div id="dialog-content"></div></dialog>
+    <dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
     <script type="module" src="/app.js"></script>
   </body>
 </html>
