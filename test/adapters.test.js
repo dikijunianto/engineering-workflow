@@ -15,6 +15,7 @@ import {
   GitHubProvider,
   GoogleChatWebhook,
   SkillRunner,
+  parsePublisherResponse,
   createAdapters,
   runProcess,
 } from "../src/adapters.js";
@@ -1102,7 +1103,7 @@ test("direct local Jira skills isolate the configured MCP server and preserve pa
   const appendixContent = await readFile(new URL("./fixtures/jira-appendix.md", import.meta.url), "utf8");
   const appendixPath = path.join(dir, "appendix.md");
   await writeFile(appendixPath, appendixContent);
-  let copied, calls = 0;
+  let copied, calls = 0, readBackMode = "key";
   const runtime = {
     start: async (input) => {
       copied = input.mcpConfig;
@@ -1129,9 +1130,9 @@ test("direct local Jira skills isolate the configured MCP server and preserve pa
       assert.equal(input.nativeSkill, "devquest-jira:upload-task-to-jira");
       assert.doesNotMatch(input.prompt, /https:\/\/other.example/);
       if (verification) { for (const event of jiraEvidence("FFE")) input.onEvent(event); return { text: '{"prepared":true}' }; }
-      input.onEvent({ type: "jira-read", method: "getJiraIssue", input: { issueIdOrKey: "FFE-1" }, content: { key: "FFE-1", fields: { project: { key: "FFE" }, description: "devquest:q:appendix:T1.1" } } });
+      if (readBackMode !== "missing") input.onEvent({ type: "jira-read", method: "getJiraIssue", input: { issueIdOrKey: readBackMode === "numeric" ? "12345" : "FFE-1" }, content: { key: "FFE-1", fields: { project: { key: "FFE" }, description: "devquest:q:appendix:T1.1" } } });
       return {
-        text: JSON.stringify({
+        text: "Sample created and verified.\n\n```json\n" + JSON.stringify({
           results: [
             {
               taskId: "task-a",
@@ -1140,7 +1141,7 @@ test("direct local Jira skills isolate the configured MCP server and preserve pa
               url: "https://jira.example/FFE-1",
             },
           ],
-        }),
+        }) + "\n```\nReview before another batch.",
       };
     },
   };
@@ -1161,6 +1162,39 @@ test("direct local Jira skills isolate the configured MCP server and preserve pa
     import("node:fs/promises").then(({ stat }) => stat(copied)),
     /ENOENT/,
   );
+  const scoped = readyPublisherInput({
+    quest: {id:"q",jiraContext:{project:"FFE",siteUrl:"https://jira.example",epic:"FFE-1",assignee:"synthetic"}},
+    tasks:[{id:"task-a"}],appendixPath,appendixContent,skillPaths:{upload:file},maxIssues:1,
+  });
+  scoped.publicationManifest.search.visibilityVerified=false;
+  scoped.publicationManifest.visibilityScope="account-visible";
+  let dispatched=0;const forwarded=[];
+  scoped.onDispatch=()=>dispatched++;
+  scoped.onEvent=event=>forwarded.push(event.type);
+  await assert.rejects(skill.publish(scoped),error=>error.publisherNotStarted===true);
+  assert.equal(dispatched,0);
+  scoped.quest.jiraSearchScopeAcceptance={scope:"account-visible",artifactId:scoped.appendixArtifactId,
+    artifactHash:scoped.appendixHash,project:"FFE",siteUrl:"https://jira.example",epic:"FFE-1"};
+  assert.equal((await skill.publish(scoped)).length,1);
+  assert.equal(dispatched,1);assert.ok(forwarded.includes("native-skill"));assert.ok(forwarded.includes("jira-read"));
+  readBackMode = "numeric";
+  assert.equal((await skill.publish(scoped)).length, 1, "numeric Jira ID read-back still verifies the returned key");
+  readBackMode = "missing";
+  let readOnlyChecks = 0, description = "devquest:q:appendix:T1.1";
+  skill.preflightPublication = async () => {
+    readOnlyChecks++;
+    return {cloudId:scoped.publicationManifest.cloudId,projectId:scoped.publicationManifest.projectId,
+      siteUrl:scoped.publicationManifest.siteUrl,searchPages:[{isLast:true,issues:[{key:"FFE-1",
+        fields:{project:{key:"FFE"},description}}]}]};
+  };
+  assert.equal((await skill.publish(scoped)).length, 1);
+  assert.equal(readOnlyChecks, 1);
+  assert.ok(forwarded.includes("publication-verification"));
+  description = "devquest:q:appendix:T1.10";
+  await assert.rejects(skill.publish(scoped), /unconfirmed issue key\/marker after read-only reconciliation/);
+  skill.preflightPublication = async () => {throw new Error("Read-only Jira verification unavailable");};
+  await assert.rejects(skill.publish(scoped), /Read-only Jira verification unavailable/);
+
   skill.close();
   await assert.rejects(
     skill.appendix({
@@ -1497,4 +1531,52 @@ test("native metadata read evidence verifies actual returned file lines; claims,
   assert.deepEqual(proof.find(e => e.toolUseId === "claim").ranges, []);
   assert.deepEqual(proof.find(e => e.toolUseId === "stale").ranges, []);
   assert.ok(proof.every(e => e.hash === contract.hash));
+});
+
+
+test("publisher decodes the actual prose and fenced result without accepting ambiguous output", async () => {
+  const text = await readFile(new URL("./fixtures/jira-publisher-prose-result.txt", import.meta.url), "utf8");
+  const parsed = parsePublisherResponse(text);
+  assert.equal(parsed.results[0].key, "FCAD-6297");
+  assert.equal(parsed.results[0].appendixTaskId, "T1.1");
+  assert.deepEqual(parsePublisherResponse(JSON.stringify(parsed)), parsed);
+  assert.throws(() => parsePublisherResponse(text + "\n```json\n{}\n```"), /unambiguous/);
+  assert.throws(() => parsePublisherResponse("Created FCAD-6297"), /unambiguous/);
+  assert.throws(() => parsePublisherResponse("```json\n{broken}\n```"), /invalid/);
+});
+
+test("model-free Jira verification never inherits the paid publisher profile or route", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "devquest-verify-profile-"));
+  t.after(() => rm(dir, {recursive:true,force:true}));
+  const file=path.join(dir,'SKILL.md'),config=path.join(dir,'mcp.json');
+  await writeFile(file,'---\nname: upload-task-to-jira\ndescription: Synthetic skill\n---\n# Publish approved input');
+  await writeFile(config,JSON.stringify({mcpServers:{atlassian:{type:'http',url:'https://synthetic.invalid/mcp'}}}));
+  const skill=new SkillRunner({mcpConfigPath:config});
+  const appendixContent=await readFile(new URL('./fixtures/jira-appendix.md',import.meta.url),'utf8');
+  const context={prompt:'Publisher Soul only',snapshot:{route:{resolvedModel:'claude-sonnet-5-5',resolvedEffort:'high'}},hash:'synthetic'};
+  for (const kind of ['upload','verify']) {
+    const prepared=await skill.prepareAppendix({skillPaths:{upload:file},quest:{jiraContext:{project:'FCAD',epic:'FCAD-6205'}},appendixContent,agentProfileContext:context},kind);
+    try {
+      if(kind==='verify') {
+        assert.equal(prepared.profileSnapshot,undefined);
+        assert.equal(prepared.profileSnapshotHash,undefined);
+        assert.equal(prepared.route,undefined);
+        assert.doesNotMatch(prepared.prompt,/Publisher Soul only/);
+        assert.equal(prepared.mcpGuard.stage,'verify');
+        assert.ok(!prepared.mcpTools.some(tool=>/create|update|delete|transition/i.test(tool)));
+      } else {
+        assert.deepEqual(prepared.profileSnapshot,context.snapshot);
+        assert.deepEqual(prepared.route,context.snapshot.route);
+        assert.equal(prepared.profileSnapshotHash,context.hash);
+      }
+    } finally {await prepared.cleanup();}
+  }
+});
+
+test('Bitbucket PR attempts fail before GitHub commands or pushes',async()=>{
+ let calls=0;
+ const provider=new GitHubProvider({runner:async()=>{calls++;throw Error('must not execute')}});
+ await assert.rejects(provider.create({remote:'git@bitbucket.org:team/repo.git'}),/hosted on Bitbucket/);
+ await assert.rejects(provider.create({remote:'https://bitbucket.org/team/repo.git'}),/hosted on Bitbucket/);
+ assert.equal(calls,0);
 });

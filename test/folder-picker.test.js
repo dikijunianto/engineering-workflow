@@ -109,20 +109,13 @@ test("folder inspection prefers Git roots, catches aliases/duplicates, and never
 test("path updates reject running secondary-repository Quest dependencies and preserve IDs", async (t) => {
   const f = await fixture(t, { realGit: true });
   const secondary = f.repos[1];
-  execFileSync(
-    "git",
-    ["remote", "add", "origin", "https://example.test/project.git"],
-    { cwd: secondary.path },
-  );
-  f.store.put("repositories", {
-    ...secondary,
-    remote: "https://example.test/project.git",
-  });
   await f.engine.action("ANALYZE_PRD", {
     questId: f.quest.id,
     runtime: "claude",
   });
-  assert.equal(f.pending[0].options.cwd, f.repos[0].path);
+  assert.equal(f.pending[0].options.cwd, f.store.get("quests",f.quest.id).analysisBaselines[0].path);
+  execFileSync("git",["remote","set-url","origin","https://example.test/project.git"],{cwd:secondary.path});
+  f.store.put("repositories",{...secondary,remote:"https://example.test/project.git"});
   const preview = await f.engine.action("INSPECT_REPOSITORY_FOLDER", {
     repositoryId: secondary.id,
     path: secondary.path,

@@ -178,12 +178,15 @@ export class AgentContextComposer {
       const work = this.e.get("works", options.workId),
         task = options.taskId && this.e.get("tasks", options.taskId);
       const assigned =
-        task?.workspace?.path ||
-        (options.purpose === "v11-fix"
+        options.purpose === "v11-fix"
           ? work.fixWorkspace?.path
           : options.purpose === "v11-conflict"
             ? work.path
-            : work.path);
+            : task?.workspace?.path || work.path;
+      if (options.purpose === "v11-conflict")
+        check(task?.commit && task.questId === quest.id && work.questId === quest.id &&
+          task.repoId === work.repoId && work.integration?.taskId === task.id && work.integration.commit === task.commit,
+          "conflict workspace requires the exact pending task integration");
       check(
         assigned && realpathSync(assigned) === realpathSync(options.cwd),
         "Developer workspace differs from backend assignment",
@@ -247,6 +250,9 @@ export class AgentContextComposer {
         repositoryId: roots[index]?.id || r.id,
         path: realpathSync(r.path),
       })),
+      ...(!options.readOnly && options.accessScope.readOnlyReferences?.length ? {
+        readOnlyReferences:options.accessScope.readOnlyReferences.map(r=>({id:r.id,path:realpathSync(r.path),...(r.allowedFiles ? {allowedFiles:r.allowedFiles} : {})})),
+      } : {}),
       nestedSpawning: false,
       shell: false,
       mcp: options.mcpGuard ? { ...options.mcpGuard, reservationDirectory: undefined } : null,
@@ -274,6 +280,23 @@ export class AgentContextComposer {
         options.artifactScope
           ? { ...c, repositories: c.repositories.map((r) => ({ id: r.id })) }
           : c;
+      // Existing Developer snapshots predate the backend's selected-repository read-only reader.
+      if (role === "developer" && !snapshot.capabilities.readOnlyReferences && capabilities.readOnlyReferences?.length) {
+        const {readOnlyReferences,...priorScope}=capabilities;
+        check(JSON.stringify(scope(snapshot.capabilities)) === JSON.stringify(scope(priorScope)),
+          "only selected-repository read-only references may extend this legacy Developer scope");
+        snapshot={...snapshot,capabilities,scopeUpgrade:"SELECTED_REPOSITORY_READ_ONLY_REFERENCES_V1"};
+      }
+      const referenceAdditions = capabilities.readOnlyReferences?.filter(r=>
+        ["go-module-cache","assigned-worktree-history"].includes(r.id) &&
+        !snapshot.capabilities.readOnlyReferences?.some(old=>old.id===r.id)) || [];
+      if (role === "developer" && referenceAdditions.length) {
+        const priorScope = {...capabilities,readOnlyReferences:capabilities.readOnlyReferences.filter(r=>!referenceAdditions.includes(r))};
+        if (!priorScope.readOnlyReferences.length) delete priorScope.readOnlyReferences;
+        check(JSON.stringify(scope(snapshot.capabilities)) === JSON.stringify(scope(priorScope)),
+          "only installed dependency and assigned worktree history reads may extend this Developer scope");
+        snapshot={...snapshot,capabilities,scopeUpgrade:"DEPENDENCY_AND_WORKTREE_HISTORY_READ_ONLY_V1"};
+      }
       check(
         JSON.stringify(scope(snapshot.capabilities)) === JSON.stringify(scope(capabilities)),
         "authorized scope changed; start an explicitly reviewed new run",

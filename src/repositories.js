@@ -1,5 +1,5 @@
 import path from "node:path";
-import { lstat } from "node:fs/promises";
+import { lstat, mkdir } from "node:fs/promises";
 import { hash } from "./store.js";
 import { assert } from "./routing.js";
 
@@ -72,7 +72,7 @@ export class RepositoryOperations {
         ),
       "Invalid GitHub reviewers",
     );
-    const baseResolution = input.baseResolution ?? repo.baseResolution ?? null;
+    const baseResolution = Object.hasOwn(input, "baseResolution") ? input.baseResolution : repo.baseResolution ?? null;
     assert(
       baseResolution === null || ["local", "origin"].includes(baseResolution),
       "Invalid base-resolution policy",
@@ -118,6 +118,22 @@ export class RepositoryOperations {
         task ? `task-${hash(task.id).slice(0, 12)}` : "integration",
       ),
     };
+  }
+  async analysisSnapshot(quest, repo) {
+    const branch = await this.ref(repo.path, repo.baseBranch || repo.defaultBranch);
+    await this.command(repo.path, ["fetch", "--no-tags", "origin",
+      `refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+    const commit = await this.command(repo.path, ["rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`]);
+    assert(/^[a-f0-9]{40,64}$/.test(commit), "Remote baseline did not resolve to a commit");
+    const target = path.join(this.store.dir, "analysis-worktrees", hash(quest.id).slice(0,16), hash(repo.id).slice(0,16), commit);
+    const existing = await lstat(target).catch(error => {if(error.code !== "ENOENT") throw error; return null;});
+    if (!existing) {
+      await mkdir(path.dirname(target), {recursive:true});
+      await this.command(repo.path, ["worktree", "add", "--detach", target, commit]);
+    }
+    assert(await this.command(target, ["rev-parse", "HEAD"]) === commit &&
+      !(await this.command(target, ["status", "--porcelain"])), "Analysis snapshot changed; restore its clean baseline before reuse");
+    return {repoId:repo.id, branch, remote:"origin", commit, path:target, fetchedAt:new Date().toISOString()};
   }
   async designMetadata(repo) {
     if (!this.git.runner)
@@ -298,15 +314,21 @@ export class RepositoryOperations {
     assert(!after.dirty, "Commit left changes in the workspace");
     return after.head;
   }
-  async integrate(repo, work, task) {
+  async integrate(repo, work, task, validatedRepair) {
     const current = await this.inspect(repo, work);
     const pending = await this.command(
       work.path,
       ["rev-parse", "--verify", "MERGE_HEAD"],
       true,
     );
+    const repair = work.integration?.repairBase;
+    const ownedRepair = validatedRepair?.passed === true &&
+      validatedRepair.head === current.head && validatedRepair.fingerprint === current.fingerprint &&
+      work.integration.taskId === task.id && repair?.clean === true &&
+      repair.taskCommit === task.commit && repair.head === current.head;
     assert(
       !current.dirty ||
+        ownedRepair ||
         (pending.code === 0 &&
           work.integration?.taskId === task.id &&
           pending.stdout.trim() === task.commit),
@@ -317,7 +339,13 @@ export class RepositoryOperations {
       ["merge-base", "--is-ancestor", task.commit, "HEAD"],
       true,
     );
-    if (already.code === 0) return current.head;
+    if (already.code === 0) {
+      if (current.dirty && pending.code !== 0) {
+        assert(ownedRepair, "Integration edits lack a validated repair baseline; review preserved changes before retrying");
+        return this.commit(repo,work,`chore : repair integration ${task.key} (${work.branch})`);
+      }
+      return current.head;
+    }
     assert(already.code === 1, "Cannot inspect task integration ancestry");
     if (pending.code === 0) {
       assert(

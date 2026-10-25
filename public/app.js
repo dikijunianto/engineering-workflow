@@ -90,14 +90,14 @@ const orchestratorRole = {
 const appendixRole = {
   key: "jira_appendix",
   label: "Jira Specialist",
-  purposes: ["jira_appendix_generation"],
+  purposes: ["jira_appendix_generation", "jira_publish"],
 };
 const roleFor = (run) =>
   [appendixRole, orchestratorRole, ...roles].find(
     (r) => r.key === run.role || r.purposes.includes(run.purpose),
   ) || roles[2];
-const stageNames = { brainstorm: "Brainstorm", analysis: "Repository analysis", trd: "Technical design", spec: "Specification", plan: "Implementation plan", jira_appendix_generation: "Jira appendix", task: "Implementation", "v11-task": "Implementation", "v11-fix": "Implementation fix", "v11-route": "Routing", review: "Independent review", "v11-review": "Independent review" };
-const runtimeName = (key) => (key === "codex" ? "Codex" : "Claude Code");
+const stageNames = { brainstorm: "Brainstorm", analysis: "Repository analysis", trd: "Technical design", spec: "Specification", plan: "Implementation plan", jira_appendix_generation: "Jira appendix", jira_publish: "Jira publication", task: "Implementation", "v11-task": "Implementation", "v11-fix": "Implementation fix", "v11-route": "Routing", review: "Independent review", "v11-review": "Independent review" };
+const runtimeName = (key) => key === "skill-bridge" ? "Local skill bridge" : (key === "codex" ? "Codex" : "Claude Code");
 const labels = {
   home: "Overview",
   quests: "Projects",
@@ -353,6 +353,10 @@ function agentProfileDetails(run) {
   return `<details class="panel-body"><summary>Agent Profile · ${esc(s.profile.id)}@${esc(s.profile.version)}</summary><p>${esc(s.profile.name)} · Hash: ${esc(s.profile.hash.slice(0, 12))}</p><p>Runtime: ${esc(runtimeName(s.runtime))} · Stage: ${esc(s.stage)}</p><p>Model: ${esc(s.requestedModel || "UNKNOWN")} → ${esc(s.route?.resolvedModel || "UNKNOWN")} · Effort: ${esc(s.requestedEffort || "UNKNOWN")} → ${esc(s.route?.resolvedEffort || "UNKNOWN")} (configured; runtime evidence reported separately)</p><p>Repositories: ${s.capabilities.repositories.map((r) => esc(repository(r.repositoryId || r.id)?.name || (s.role === "jira-specialist" ? "Approved Project documents" : r.id))).join(", ")}</p><p>Standards: ${s.repositoryStandards.map((p) => `${esc(repository(p.repositoryId)?.name || p.repositoryId)} · ${esc(p.sourceType)} · ${esc(p.status)} · ${esc(p.hash?.slice(0, 12) || "no hash")} · ${esc(p.commit?.slice(0, 8) || "no Git SHA")}`).join("<br>") || "Approved-document scope only"}</p><p>Skills: ${s.skills.map((p) => `${esc(p.name)} · ${esc(p.hash?.slice(0, 12) || p.status)}`).join(", ") || "None"}</p><p>Permissions: ${s.readOnly ? "Read only" : "Assigned worktree writes"}; no shell or nested agents. MCP: ${esc(s.capabilities.mcp?.stage || "none")}</p><small>Attempt ${esc(run.attemptNumber)} · Logical run ${esc(run.logicalRunId)}</small></details>`;
 }
 function runProgress(run) {
+  if (run.purpose === "jira_publish" && run.state !== "RUNNING")
+    return run.state === "COMPLETED" ? "Jira publication completed; review verified issue mappings."
+      : run.publisherStarted === false ? "Publisher did not start. Review the error, then retry through publication confirmation."
+      : "Publication requires reconciliation before another explicitly confirmed attempt.";
   if (run.state === "RUNNING") {
     const labels = {
       STARTING: "Preparing agent",
@@ -377,14 +381,15 @@ function runCard(run) {
   const waiting =
     ["PAUSED", "INTERRUPTED", "WAITING_INPUT", "FAILED", "COMPLETED"].includes(run.state) &&
     !(run.contractVersion === 1 && run.state === "COMPLETED") &&
-    !(run.purpose === "jira_appendix_generation" && run.state === "COMPLETED");
+    !(run.purpose === "jira_appendix_generation" && run.state === "COMPLETED") &&
+    run.purpose !== "jira_publish";
   const role = roleFor(run);
   const output =
-    (run.state === "FAILED" ? run.summary : liveOutput.get(run.id) || run.summary) ||
+    (run.state === "FAILED" ? [run.error || run.summary, run.output].filter(Boolean).join("\n\n") : liveOutput.get(run.id) || run.output || run.summary) ||
     (run.state === "RUNNING"
       ? "The session is running. Live output is temporary; save points preserve essential context."
       : "No summary is available yet. Inspect the preserved worktree and save points before continuing.");
-  return `<section class="panel run-card ${role.key}" data-agent-run="${esc(run.id)}"><div class="row-head"><div class="run-identity"><span class="role-avatar">${icon(role.key)}</span><div><small>${role.label} · ${runtimeName(run.runtime)}</small><h3>${esc(run.displayName || task?.title || run.purpose)}</h3></div></div>${badge(run.state)}</div><p class="panel-body muted" data-run-progress="${esc(run.id)}" role="status">${esc(runProgress(run))}</p>${run.purpose === "jira_appendix_generation" ? `<div class="panel-body"><small>Skill: ${esc(run.skill || "create-appendix-task-list")} · ${esc(run.phase || run.state)}<br>Model: ${esc(run.actualModel || run.resolvedModel || "Unavailable")} · ${esc(run.resolvedEffort || "Unavailable")}<br>Elapsed: <span data-agent-elapsed data-start="${esc(run.startedAt || run.createdAt)}" data-end="${esc(run.finishedAt || (run.state !== "RUNNING" ? run.updatedAt : "") || "")}">${Math.max(0, Math.floor((Date.parse(run.finishedAt || (run.state !== "RUNNING" && run.updatedAt) || new Date().toISOString()) - Date.parse(run.startedAt || run.createdAt)) / 1000))}s</span> · Last progress: ${run.lastProgressAt ? time(run.lastProgressAt) : "Awaiting process"}</small></div>` : ""}${run.pid ? `<small class="truncate" title="${esc(run.cwd)}">Process ${run.pid} · ${esc(run.cwd)}</small>` : ""}${["PAUSED", "INTERRUPTED"].includes(run.state) ? `<div class="savepoint-note">${icon("clock")}<div><strong>Progress preserved</strong><small>Last Save Point${run.updatedAt ? ` · ${time(run.updatedAt)}` : ""}. Continue when you are ready.</small></div></div>` : ""}<pre class="run-output" data-output="${run.id}" tabindex="0" aria-label="Agent response">${esc(responseText(output))}</pre>${run.registeredSkills?.length ? `<details class="panel-body"><summary>Assigned guidance · ${run.registeredSkills.length}</summary><ul>${run.registeredSkills.map((skill) => `<li>${esc(skill.name)} · revision ${skill.revision} · ${esc(skill.runtime)}<br><code>${esc(skill.hash)}</code><br>Guidance included in prompt; native invocation and semantic consumption unverified.</li>`).join("")}</ul></details>` : ""}${agentProfileDetails(run)}${run.accessPreflight ? `<details class="panel-body"><summary>Repository access: ${esc(run.accessPreflight.status)}</summary><pre class="document">${esc(JSON.stringify({ ...run.accessPreflight, arguments: run.cliArguments }, null, 2))}</pre></details>` : ""}${run.route ? `<details class="panel-body"><summary>Model routing & usage</summary><p>${esc(run.role)} · ${esc(run.runtime)} · requested ${esc(run.requestedModel)} / ${esc(run.requestedEffort)} · resolved ${esc(run.resolvedModel)} / ${esc(run.resolvedEffort)}</p><p>Runtime-reported model: ${esc(run.actualModel || "NOT_AVAILABLE")} · ${esc(run.route.complexity)} / ${esc(run.route.risk)}</p><p>${esc(run.route.reason)}</p><small>Input tokens: ${esc(run.usage?.input_tokens ?? "NOT_AVAILABLE")} · Output tokens: ${esc(run.usage?.output_tokens ?? "NOT_AVAILABLE")} · Cost: NOT_AVAILABLE · Duration: ${esc(run.durationMs ?? "NOT_AVAILABLE")} ms</small><p>Optimization bootstrap: ${esc(JSON.stringify(run.optimizations || {}))}</p></details>` : ""}<div class="task-actions">${run.state === "RUNNING" ? button("Pause", "PAUSE_AGENT", { "run-id": run.id }) + button(run.purpose === "jira_appendix_generation" ? "Cancel generation" : "Interrupt", run.purpose === "jira_appendix_generation" ? "CANCEL_APPENDIX" : "INTERRUPT_AGENT", { "run-id": run.id }, "danger") : ""}${waiting && task?.state !== "COMPLETED" ? button("Continue", "CONTINUE_AGENT", { "run-id": run.id }, "primary small") : ""}${run.purpose === "jira_appendix_generation" && ["WAITING_INPUT", "PAUSED", "INTERRUPTED"].includes(run.state) ? button("Cancel generation", "CANCEL_APPENDIX", { "run-id": run.id }, "danger small") : ""}${button("Save checkpoint", "checkpoint", { "run-id": run.id }, "small")}</div>${waiting ? `<form data-form="message" data-run="${run.id}"><label>Instruction for this agent<textarea name="message" rows="2" required placeholder="Clarify a decision or give the next instruction…"></textarea></label><button class="btn small" type="submit">Send instruction ↗</button><div class="form-error" role="alert"></div></form>` : `<small>${(run.contractVersion === 1 || run.purpose === "jira_appendix_generation") && ["COMPLETED", "CANCELLED"].includes(run.state) ? "Use the Project actions to review or regenerate the appendix." : "Pause the current turn to send a new instruction."}</small>`}</section>`;
+  return `<section class="panel run-card ${role.key}" data-agent-run="${esc(run.id)}"><div class="row-head"><div class="run-identity"><span class="role-avatar">${icon(role.key)}</span><div><small>${role.label} · ${runtimeName(run.runtime)}</small><h3>${esc(run.displayName || task?.title || run.purpose)}</h3></div></div>${badge(run.state)}</div><p class="panel-body muted" data-run-progress="${esc(run.id)}" role="status">${esc(runProgress(run))}</p>${["jira_appendix_generation", "jira_publish"].includes(run.purpose) ? `<div class="panel-body"><small>Skill: ${esc(run.skill || "create-appendix-task-list")} · ${esc(run.phase || run.state)}<br>Model: ${esc(run.actualModel || run.resolvedModel || "Unavailable")} · ${esc(run.resolvedEffort || "Unavailable")}<br>Elapsed: <span data-agent-elapsed data-start="${esc(run.startedAt || run.createdAt)}" data-end="${esc(run.finishedAt || (run.state !== "RUNNING" ? run.updatedAt : "") || "")}">${Math.max(0, Math.floor((Date.parse(run.finishedAt || (run.state !== "RUNNING" && run.updatedAt) || new Date().toISOString()) - Date.parse(run.startedAt || run.createdAt)) / 1000))}s</span> · Last progress: ${run.lastProgressAt ? time(run.lastProgressAt) : "Awaiting process"}</small></div>` : ""}${run.pid ? `<small class="truncate" title="${esc(run.cwd)}">Process ${run.pid} · ${esc(run.cwd)}</small>` : ""}${["PAUSED", "INTERRUPTED"].includes(run.state) ? `<div class="savepoint-note">${icon("clock")}<div><strong>Progress preserved</strong><small>Last Save Point${run.updatedAt ? ` · ${time(run.updatedAt)}` : ""}. Continue when you are ready.</small></div></div>` : ""}<pre class="run-output" data-output="${run.id}" tabindex="0" aria-label="Agent response">${esc(responseText(output))}</pre>${run.registeredSkills?.length ? `<details class="panel-body"><summary>Assigned guidance · ${run.registeredSkills.length}</summary><ul>${run.registeredSkills.map((skill) => `<li>${esc(skill.name)} · revision ${skill.revision} · ${esc(skill.runtime)}<br><code>${esc(skill.hash)}</code><br>Guidance included in prompt; native invocation and semantic consumption unverified.</li>`).join("")}</ul></details>` : ""}${agentProfileDetails(run)}${run.accessPreflight ? `<details class="panel-body"><summary>Repository access: ${esc(run.accessPreflight.status)}</summary><pre class="document">${esc(JSON.stringify({ ...run.accessPreflight, arguments: run.cliArguments }, null, 2))}</pre></details>` : ""}${run.route ? `<details class="panel-body"><summary>Model routing & usage</summary><p>${esc(run.role)} · ${esc(run.runtime)} · requested ${esc(run.requestedModel)} / ${esc(run.requestedEffort)} · resolved ${esc(run.resolvedModel)} / ${esc(run.resolvedEffort)}</p><p>Runtime-reported model: ${esc(run.actualModel || "NOT_AVAILABLE")} · ${esc(run.route.complexity)} / ${esc(run.route.risk)}</p><p>${esc(run.route.reason)}</p><small>Input tokens: ${esc(run.usage?.input_tokens ?? "NOT_AVAILABLE")} · Output tokens: ${esc(run.usage?.output_tokens ?? "NOT_AVAILABLE")} · Cost: NOT_AVAILABLE · Duration: ${esc(run.durationMs ?? "NOT_AVAILABLE")} ms</small><p>Optimization bootstrap: ${esc(JSON.stringify(run.optimizations || {}))}</p></details>` : ""}<div class="task-actions">${run.state === "RUNNING" ? button("Pause", "PAUSE_AGENT", { "run-id": run.id }) + button(run.purpose === "jira_appendix_generation" ? "Cancel generation" : "Interrupt", run.purpose === "jira_appendix_generation" ? "CANCEL_APPENDIX" : "INTERRUPT_AGENT", { "run-id": run.id }, "danger") : ""}${waiting && task?.state !== "COMPLETED" ? button("Continue", "CONTINUE_AGENT", { "run-id": run.id }, "primary small") : ""}${run.purpose === "jira_appendix_generation" && ["WAITING_INPUT", "PAUSED", "INTERRUPTED"].includes(run.state) ? button("Cancel generation", "CANCEL_APPENDIX", { "run-id": run.id }, "danger small") : ""}${button("Save checkpoint", "checkpoint", { "run-id": run.id }, "small")}</div>${waiting ? `<form data-form="message" data-run="${run.id}"><label>Instruction for this agent<textarea name="message" rows="2" required placeholder="Clarify a decision or give the next instruction…"></textarea></label><button class="btn small" type="submit">Send instruction ↗</button><div class="form-error" role="alert"></div></form>` : `<small>${run.purpose === "jira_publish" ? "Review publication results and use explicit publication confirmation for another attempt." : (run.contractVersion === 1 || run.purpose === "jira_appendix_generation") && ["COMPLETED", "CANCELLED"].includes(run.state) ? "Use the Project actions to review or regenerate the appendix." : "Pause the current turn to send a new instruction."}</small>`}</section>`;
 }
 function jira() {
   const tasks = state.tasks.filter((t) => t.jira);
@@ -1018,7 +1023,7 @@ function questView(id, tab = "overview", sectionOnly = false) {
               ? `<button class="btn small" disabled title="${esc(artifact(id, "appendix").publicationError)}">Publish to Jira</button><small role="status">${esc(artifact(id, "appendix").publicationError)}</small>`
               : button(
                   tasks.some((t) => t.jira)
-                    ? "Publish next Jira batch (up to 5)"
+                    ? "Publish all remaining Jira tickets"
                     : "Publish to Jira (sample)",
                   "PUBLISH_JIRA",
                   { "quest-id": id },
@@ -1322,7 +1327,10 @@ function render(force = false) {
       `${id}-${focusDocument === "appendix" && !artifact(id, "ticket") ? "ticket" : focusDocument}`,
     );
   }
-  const isDashboard = route === "home" || route === "agents";
+  const isDashboard =
+    route === "home" ||
+    route === "agents" ||
+    (route === "quest" && Boolean(dashboardUI?.ProjectDetail));
   if (!isDashboard || (changedRoute && lastRenderedProjectRoute)) dashboardUI?.unmountOverview();
   if (!isDashboard || !dashboardUI || changedRoute) $("#main").innerHTML =
     isDashboard && dashboardUI ? '<div id="dashboard-root"></div>' :
@@ -1350,7 +1358,7 @@ function render(force = false) {
               : route === "settings"
                 ? settings()
                 : home();
-  dashboardUI?.updateDashboard(state, { newProject: newQuest, addRepository, viewRun: showAgentRun, runProgress, checkRuntime: (runtime) => action("CHECK_READINESS", { runtime }), terminateRun: (runId) => { const run = state.runs.find(item => item.id === runId); if (!run || run.state !== "RUNNING") throw new Error("This session is no longer running. Refresh and review its saved logs."); return action(run.purpose === "jira_appendix_generation" ? "CANCEL_APPENDIX" : "INTERRUPT_AGENT", { runId }); }, jiraSettings: () => { location.hash = "#settings"; setTimeout(() => { const section = document.querySelector('[data-disclosure="settings-integrations"]'); if (section) { section.open = true; section.scrollIntoView({ block: "start" }); } }, 0); } }, { route, restartRequired: Boolean(serverSession?.restartRequired) });
+  dashboardUI?.updateDashboard(state, { newProject: newQuest, addRepository, viewRun: showAgentRun, runProgress, checkRuntime: (runtime) => action("CHECK_READINESS", { runtime }), terminateRun: (runId) => { const run = state.runs.find(item => item.id === runId); if (!run || run.state !== "RUNNING") throw new Error("This session is no longer running. Refresh and review its saved logs."); return action(run.purpose === "jira_appendix_generation" ? "CANCEL_APPENDIX" : "INTERRUPT_AGENT", { runId }); }, jiraSettings: () => { location.hash = "#settings"; setTimeout(() => { const section = document.querySelector('[data-disclosure="settings-integrations"]'); if (section) { section.open = true; section.scrollIntoView({ block: "start" }); } }, 0); } }, { route, id, tab, focusDocument, restartRequired: Boolean(serverSession?.restartRequired) });
   if (changedRoute) {
     const wasOpen = $("#primary-navigation").classList?.contains?.("is-open");
     $("#primary-navigation").classList?.toggle("is-open", false);
@@ -1782,11 +1790,29 @@ document.addEventListener("click", async (event) => {
     }
     return;
   }
+  if (type === "retry-budget") {
+    const task = state.tasks.find(t=>t.id===target.dataset.taskId);
+    const quest = state.quests.find(q=>q.id===task?.questId);
+    if (!task || !quest) return toast("Task no longer exists; reload the project.");
+    const limit = Math.max(quest.execution.limits.retries,task.manualRetryLimit || 0);
+    return dialog("Allow one more retry · " + task.key,
+      `<input type="hidden" name="questId" value="${esc(quest.id)}"><input type="hidden" name="taskId" value="${esc(task.id)}"><input type="hidden" name="expectedRetries" value="${task.retries || 0}"><input type="hidden" name="expectedLimit" value="${limit}"><p>This task has used ${task.retries || 0} of ${limit} retries. Allow one additional attempt for this task only?</p><p>This preserves failed attempts and does not start an agent. Submit your instruction separately after allowing the retry; that execution may consume paid usage.</p>`,
+      "retry-budget", "Allow one more retry");
+  }
+  if (type === "task-attention") {
+    event.preventDefault();
+    const task = state.tasks.find(t => t.id === target.dataset.taskId);
+    if (!task) return toast("Task no longer exists; reload the project.");
+    const baseConflict = /baseResolution/.test(task.error || "");
+    return dialog("Task needs attention · " + task.key,
+      `<p>${esc(task.title)}</p><p>${baseConflict ? "Choose which base commit new task worktrees should use in Repository branch policy, then retry. Retrying without resolving the policy will fail again." : "Resolve the reported validation or environment failure before retrying. Retry does not approve or bypass a failed baseline."}</p><pre class="document">${esc(task.attentionDiagnosis?.details || task.error || "No saved diagnostic available.")}</pre>${baseConflict ? button("Configure repository branch policy", "repository-config", {"repository-id":task.repoId}) : ""}`,
+      "attention-info", "Close");
+  }
   if (type === "repository-config") {
     const repo = repository(target.dataset.repositoryId);
     return dialog(
       "Repository branch policy",
-      `<input type="hidden" name="repositoryId" value="${esc(repo.id)}">${["defaultBranch", "baseBranch", "prTarget"].map((name) => `<label>${name}<input name="${name}" required value="${esc(repo[name] || "")}"></label>`).join("")}<label>Protected branch patterns<input name="protectedBranches" value="${esc((repo.protectedBranches || ["main", "master"]).join(", "))}"></label><label>Default human reviewers<input name="reviewers" value="${esc((repo.reviewers || []).join(", "))}"></label><small>Configure before creating workspaces. Existing workspaces retain their reviewed target.</small>`,
+      `<input type="hidden" name="repositoryId" value="${esc(repo.id)}">${["defaultBranch", "baseBranch", "prTarget"].map((name) => `<label>${name}<input name="${name}" required value="${esc(repo[name] || "")}"></label>`).join("")}<label>When local base differs from origin<select name="baseResolution"><option value="" ${!repo.baseResolution ? "selected" : ""}>Require an explicit choice</option><option value="local" ${repo.baseResolution === "local" ? "selected" : ""}>Use local base branch</option><option value="origin" ${repo.baseResolution === "origin" ? "selected" : ""}>Use origin tracking branch</option></select></label><small>This selects a commit for new worktrees. It does not fetch, reset or switch your checkout.</small><label>Protected branch patterns<input name="protectedBranches" value="${esc((repo.protectedBranches || ["main", "master"]).join(", "))}"></label><label>Default human reviewers<input name="reviewers" value="${esc((repo.reviewers || []).join(", "))}"></label><small>Configure before creating workspaces. Existing workspaces retain their reviewed target.</small>`,
       "repository-config",
       "Save policy",
     );
@@ -1914,7 +1940,7 @@ document.addEventListener("click", async (event) => {
       });
       dialog(
         "Confirm Jira publication",
-        `<input type="hidden" name="questId" value="${esc(preview.questId)}"><input type="hidden" name="appendixArtifactId" value="${esc(preview.artifactId || "")}"><input type="hidden" name="appendixHash" value="${esc(preview.hash || "")}"><p>This will publish up to <strong>${preview.maxIssues} real Jira issue${preview.maxIssues === 1 ? "" : "s"}</strong> to <strong>${esc(preview.project)}</strong>${preview.epic ? ` under Epic ${esc(preview.epic)}` : ""}.</p><p>Approved appendix revision ${preview.revision}. “Sample” is the first real issue, not sample data. No issues are created until you confirm.</p><small>Artifact: ${esc(preview.artifactId)} · SHA-256: ${esc(preview.hash)}</small>`,
+        `<input type="hidden" name="questId" value="${esc(preview.questId)}"><input type="hidden" name="appendixArtifactId" value="${esc(preview.artifactId || "")}"><input type="hidden" name="appendixHash" value="${esc(preview.hash || "")}"><input type="hidden" name="confirmedMaxIssues" value="${preview.maxIssues}"><p>This will publish up to <strong>${preview.maxIssues} real Jira issue${preview.maxIssues === 1 ? "" : "s"}</strong> to <strong>${esc(preview.project)}</strong>${preview.epic ? ` under Epic ${esc(preview.epic)}` : ""}.</p>${preview.visibilityWarning ? `<p role="note">${esc(preview.visibilityWarning)}</p>` : ""}<p>Approved appendix revision ${preview.revision}. Already mapped tickets are excluded. This confirms the displayed remaining scope; no issues are created until you confirm.</p><small>Artifact: ${esc(preview.artifactId)} · SHA-256: ${esc(preview.hash)}</small>`,
         "publish-jira",
         "Confirm publication",
       );
@@ -2080,17 +2106,24 @@ document.addEventListener("submit", async (event) => {
     }
     if (form.dataset.form === "archive-skill")
       await action("ARCHIVE_SKILL", { skillId: values.get("skillId"), revision: Number(values.get("revision")) });
+    if (form.dataset.form === "retry-budget")
+      await action("ALLOW_TASK_RETRY", {
+        questId:values.get("questId"),taskId:values.get("taskId"),
+        expectedRetries:Number(values.get("expectedRetries")),expectedLimit:Number(values.get("expectedLimit")),confirmed:true,
+      });
     if (form.dataset.form === "publish-jira")
       await action("PUBLISH_JIRA", {
         questId: values.get("questId"),
         appendixArtifactId: values.get("appendixArtifactId"),
         appendixHash: values.get("appendixHash"),
+        confirmedMaxIssues: Number(values.get("confirmedMaxIssues")),
       });
     if (form.dataset.form === "repository-config")
       await action("CONFIGURE_REPOSITORY", {
         repositoryId: values.get("repositoryId"),
         defaultBranch: values.get("defaultBranch"),
         baseBranch: values.get("baseBranch"),
+        baseResolution: values.get("baseResolution") || null,
         prTarget: values.get("prTarget"),
         protectedBranches: String(values.get("protectedBranches") || "")
           .split(",")
@@ -2219,6 +2252,8 @@ document.addEventListener("submit", async (event) => {
           ? "Project restored. Agents and automation remain stopped."
         : form.dataset.form === "skill-registration"
           ? "Skill registered. Compatibility is declared; no agent started."
+        : ["v11-pr","create-pr"].includes(form.dataset.form)
+          ? "Preparing pull request… Check the repository card for progress or errors."
         : form.dataset.form === "jira-settings"
           ? "Jira settings saved. Review and approve the appendix again."
           : "Saved.",

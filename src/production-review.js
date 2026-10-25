@@ -333,10 +333,12 @@ export class ProductionReview {
       work.pr ||
       (await this.workflow.e.adapters.sourceControl.create({
         repoPath: repo.path,
+        remote: repo.remote,
         path: work.path,
         branch: work.branch,
         baseBranch: work.prTarget,
         title: quest.title,
+        reviewers,
         body: `${this.workflow.e.artifact(quest.id, "plan")}\n\nProduction review: ${JSON.stringify(work.productionReview)}`,
         ownership: this.workflow.git.owner(repo, work.branch),
         protectedBranches: repo.protectedBranches,
@@ -345,11 +347,13 @@ export class ProductionReview {
     work = this.workflow.e.put("works", this.workflow.e.get("works", work.id), {
       pr,
       state: "PR_CREATED",
+      error: null,
       reviewers,
     });
     if (reviewers.length) {
       await this.workflow.e.adapters.sourceControl.requestReview({
         path: work.path,
+        remote: repo.remote,
         number: pr.number,
         reviewers,
       });

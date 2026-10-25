@@ -185,8 +185,15 @@ test("FCAD native skill dry run verifies read-only before enabling the fake publ
   calls.length = 0;
   await assert.rejects(skill.publish({ ...input, verifiedCapabilities: null }), /input contract/);
   assert.equal(calls.length, 0);
+  let reconciliationChecks = 0;
+  skill.preflightPublication = async () => {
+    reconciliationChecks++;
+    return {cloudId:input.publicationManifest.cloudId,projectId:input.publicationManifest.projectId,
+      siteUrl:input.publicationManifest.siteUrl,searchPages:[{issues:[],isLast:true}]};
+  };
   await assert.rejects(skill.publish(input), /unconfirmed issue key/);
   assert.equal(calls.length, 1);
+  assert.equal(reconciliationChecks, 1);
 });
 
 test("incomplete field pages and non-writable fields are not accepted as publishing capability", () => {

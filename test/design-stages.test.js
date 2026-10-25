@@ -446,11 +446,11 @@ test("fake Tech flow stops at TRD approval with informational Git metadata and z
   );
   assert.match(
     options.prompt,
-    /configuredBase.*master.*currentBranch.*staging/,
+    /configuredBase.*development.*currentBranch.*""/,
   );
   assert.ok(
     options.gitMetadata.every(
-      (meta) => meta.informationalOnly && meta.currentBranch === "staging",
+      (meta) => meta.informationalOnly && meta.currentBranch === "" && meta.dirty === false,
     ),
   );
   assert.ok(!f.loadedSkills.includes("design"));

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile, mkdir } from "node:fs/promises";
 import { fixture } from "./engine-fixture.js";
-import { projectSettings, selectAppendixOptions } from "../src/jira-settings.js";
+import { projectSettings, selectAppendixOptions, approvalBasisMatches } from "../src/jira-settings.js";
 import { SkillRunner } from "../src/adapters.js";
 import { validateAppendix } from "../src/appendix-markdown.js";
 
@@ -254,6 +254,25 @@ test("one-click generation consumes saved settings, persists verified metadata a
   assert.throws(() => f.engine.approved(f.quest.id, "appendix"), /approval/i);
   await f.engine.action("APPROVE_APPENDIX", { questId: f.quest.id, artifactId: artifact.id });
   assert.equal(f.engine.approved(f.quest.id, "appendix").id, artifact.id);
+  const approvedRecord = f.store.all("approvals").find(a => a.kind === "appendix");
+  const metadataBefore = f.store.get("quests", f.quest.id).jiraMetadata;
+  await f.engine.action("SAVE_JIRA_CONTEXT", {
+    questId: f.quest.id, ...defaults(), epic: "SYN-12",
+  });
+  assert.deepEqual(f.store.get("quests", f.quest.id).jiraMetadata, metadataBefore);
+  assert.equal(f.engine.approved(f.quest.id, "appendix").id, artifact.id);
+  // Reproduce existing Quests affected by the old unconditional metadata clearing.
+  const current = f.store.get("quests", f.quest.id);
+  f.engine.put("quests", current, {
+    jiraMetadata: null,
+    jiraConfig: {...current.jiraConfig, createdAt: "2026-10-23T00:00:00.000Z",
+      origins: {...current.jiraConfig.origins, project: "quest"}},
+  });
+  const recovered = f.engine.snapshot().artifacts.find(a => a.id === artifact.id);
+  assert.equal(recovered.approved, true);
+  assert.equal(recovered.approvalReady, true);
+  assert.equal(f.store.all("approvals").find(a => a.id === approvedRecord.id).basis, approvedRecord.basis);
+  assert.equal(f.store.latest(f.quest.id, "appendix").id, artifact.id);
   await f.engine.action("SAVE_JIRA_CONTEXT", {
     questId: f.quest.id,
     ...defaults(),
@@ -367,4 +386,20 @@ test("Jira Specialist profile policy preserves explicit model/effort overrides a
   const next = await create(f);
   assert.throws(() => f.engine.jiraSettings.route(next), /no automatic upgrade/);
   assert.equal(f.pending.length, 0);
+});
+
+
+test("approval comparison ignores only Jira provenance, preserving material-setting gates", () => {
+  const before = {source:"source-1", plan:"plan-1", trd:"trd-1", jiraContext:{project:"SYN",epic:"SYN-12"}, jiraConfig:{...defaults(),createdAt:"before",origins:{project:"workspace"}}};
+  const after = structuredClone(before);
+  after.jiraConfig.createdAt="after";
+  after.jiraConfig.origins.project="quest";
+  const matches = value => approvalBasisMatches(JSON.stringify(before),JSON.stringify(value));
+  assert.equal(matches(after),true);
+  for (const change of [
+    v=>v.jiraContext.epic="SYN-13",v=>v.plan="plan-2",v=>v.trd="trd-2",
+    v=>v.jiraConfig.categoryFamily="ALL",v=>v.jiraConfig.backendWeights.levels.H=16,
+    v=>v.jiraConfig.mcpServer="other",v=>v.jiraContext.project="OTHER",
+  ]) {const changed=structuredClone(after);change(changed);assert.equal(matches(changed),false);}
+  assert.equal(approvalBasisMatches("invalid",JSON.stringify(before)),false);
 });

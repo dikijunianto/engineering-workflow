@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { createRepositoryReader } from "../src/repository-reader.js";
-import { CodexRuntime } from "../src/adapters.js";
+import { CodexRuntime, ClaudeCodeRuntime } from "../src/adapters.js";
 
 async function scope(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "devquest read tool "));
@@ -160,4 +160,75 @@ test("Codex scoped adapter invokes actual reader interface, preserves sandbox an
     runtime.start({ cwd: s.cwd, readOnly: true, accessScope: s }),
     /skipped a selected repository/,
   );
+});
+
+for (const Runtime of [ClaudeCodeRuntime,CodexRuntime]) test(`${Runtime.name} task references permit selected reads without external write grants`,async t=>{
+  const s=await scope(t),events=[];let invocation;
+  const runtime=new Runtime({runner:async(_file,args,options)=>{
+    invocation={args,options};
+    const url=Runtime===ClaudeCodeRuntime
+      ? JSON.parse(args[args.indexOf('--mcp-config')+1]).mcpServers.devquest_repository.url
+      : JSON.parse(args.find(a=>a.startsWith('mcp_servers=')).match(/url=("[^"]+")/)[1]);
+    const good=await rpc(url,'tools/call',{name:'ReadRepositoryFile',arguments:{repoId:'finance',path:'README.md'}});
+    assert.match(good.content[0].text,/Harmless finance/);
+    for(const arguments_ of [{repoId:'unselected',path:'README.md'},{repoId:'finance',path:'../unselected/README.md'}])
+      assert.equal((await rpc(url,'tools/call',{name:'ReadRepositoryFile',arguments:arguments_})).isError,true);
+    assert.equal((await rpc(url,'tools/call',{name:'WriteRepositoryFile',arguments:{repoId:'finance',path:'README.md',content:'bad'}})).isError,true);
+    return {code:0,stderr:'',stdout:Runtime===ClaudeCodeRuntime ? JSON.stringify({type:'result',result:'Reference inspected'}) : JSON.stringify({type:'item.completed',item:{type:'agent_message',text:'Reference inspected'}})};
+  }});
+  runtime.help='--ignore-user-config --restricted --disallowedTools --permission-mode';
+  runtime.detectCapabilities=async()=>({available:true,nestedRestriction:true});
+  await runtime.start({cwd:s.repos[1].path,readOnly:false,executionPolicy:{safeFallback:'acceptEdits',nestedSpawning:false},
+    accessScope:{cwd:s.repos[1].path,readOnly:false,repositories:[s.repos[1]],readOnlyReferences:[s.repos[0]]},onEvent:e=>events.push(e),prompt:'Implement only in the assigned worktree'});
+  assert.ok(!invocation.args.includes('--add-dir'));
+  if(Runtime===ClaudeCodeRuntime){
+    assert.ok(invocation.args.includes('--restricted'));
+    assert.equal(invocation.args[invocation.args.indexOf('--tools')+1],'Read,Glob,Grep,Edit,Write');
+    assert.match(invocation.args[invocation.args.indexOf('--allowedTools')+1],/mcp__devquest_repository__ReadRepositoryFile/);
+    assert.doesNotMatch(invocation.args[invocation.args.indexOf('--disallowedTools')+1],/mcp__\*/);
+  } else assert.equal(invocation.args[invocation.args.indexOf('--sandbox')+1],'workspace-write');
+  assert.ok(events.some(e=>e.type==='repository-tool'&&e.call.status==='PASSED'));
+});
+
+test('Claude reference recovery matches exact files and directory-scoped search descendants', async t=>{
+  const s=await scope(t); let recover=true, outside=false, directory=false, operation='Grep';
+  const runtime=new ClaudeCodeRuntime({runner:async(_file,args)=>{
+    const url=JSON.parse(args[args.indexOf('--mcp-config')+1]).mcpServers.devquest_repository.url;
+    const target=path.join(outside?s.repos[2].path:s.repos[0].path,directory?'':'README.md');
+    const stream=[
+      {type:'assistant',message:{content:[{type:'tool_use',id:'grep',name:operation,input:{path:target,pattern:'Harmless'}}]}},
+      {type:'user',message:{content:[{type:'tool_result',tool_use_id:'grep',is_error:true,content:`${target} is outside task; --restricted confines the file tools to the working directory.`}]}}
+    ];
+    if(recover){
+      const input={repoId:'finance',path:'README.md'};
+      const result=await rpc(url,'tools/call',{name:'ReadRepositoryFile',arguments:input});
+      stream.push({type:'assistant',message:{content:[{type:'tool_use',id:'ref',name:'mcp__devquest_repository__ReadRepositoryFile',input}]}},
+        {type:'user',message:{content:[{type:'tool_result',tool_use_id:'ref',content:result.content,is_error:result.isError}]}});
+    }
+    stream.push({type:'result',result:'Inspected reference'});
+    return {code:0,stderr:'',stdout:stream.map(x=>JSON.stringify(x)).join('\n')};
+  }});
+  runtime.help='--restricted --disallowedTools --permission-mode';
+  runtime.detectCapabilities=async()=>({available:true,nestedRestriction:true});
+  const options={cwd:s.repos[1].path,readOnly:false,executionPolicy:{safeFallback:'acceptEdits',nestedSpawning:false},accessScope:{cwd:s.repos[1].path,readOnly:false,repositories:[s.repos[1]],readOnlyReferences:[s.repos[0]]}};
+  await runtime.start(options);
+  directory=true;
+  await runtime.start(options);
+  operation='Glob';
+  await runtime.start(options);
+  operation='Read';
+  await assert.rejects(runtime.start(options),/permitted reader/);
+  directory=false;operation='Grep';
+  recover=false;
+  await assert.rejects(runtime.start(options),/permitted reader/);
+  outside=true;recover=true;
+  await assert.rejects(runtime.start(options),/Runtime repository access denied/);
+});
+
+test('reference directory inspection lists only immediate children and keeps traversal blocked',async t=>{
+ const s=await scope(t);const reader=await createRepositoryReader(s);t.after(()=>reader.close());
+ const listing=await rpc(reader.url,'tools/call',{name:'ReadRepositoryFile',arguments:{repoId:'finance',path:'.'}});
+ assert.match(listing.content[0].text,/README.md/);
+ const denied=await rpc(reader.url,'tools/call',{name:'ReadRepositoryFile',arguments:{repoId:'finance',path:'..'}});
+ assert.equal(denied.isError,true);
 });

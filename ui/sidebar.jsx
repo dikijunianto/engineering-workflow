@@ -7,8 +7,10 @@ import {
   Sparkles,
   SquareCheck,
   Settings,
+  Box,
 } from "lucide-react";
 import { version } from "../package.json";
+import { openOnboarding3D } from "./onboarding-3d";
 
 const groups = [
   {
@@ -30,7 +32,13 @@ const groups = [
   { title: "SYSTEM", links: [["settings", "Settings", Settings]] },
 ];
 
-export function Sidebar({ state, route = "home", connected = false, restartRequired = false }) {
+export function Sidebar({
+  state,
+  actions = {},
+  route = "home",
+  connected = false,
+  restartRequired = false,
+}) {
   const selected = route === "quest" ? "quests" : route;
   const running = state.runs.filter((run) => run.state === "RUNNING").length;
   const ready = connected && !restartRequired;
@@ -77,6 +85,16 @@ export function Sidebar({ state, route = "home", connected = false, restartRequi
                 )}
               </a>
             ))}
+            {group.title === "SYSTEM" && (
+              <button
+                type="button"
+                onClick={() => openOnboarding3D({ state, actions })}
+                className="group flex min-h-9 w-full items-center gap-2.5 rounded-r-lg border-l-2 border-transparent px-3 py-2 text-left text-[13px] font-medium text-emerald-400 transition-colors hover:bg-zinc-800/40 hover:text-emerald-300"
+              >
+                <Box className="size-4 text-emerald-400" aria-hidden="true" />
+                <span>3D Workflow Guide</span>
+              </button>
+            )}
           </div>
           {group.title === "SYSTEM" && (
             <div

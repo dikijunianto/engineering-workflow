@@ -1,5 +1,6 @@
 import { id } from "./store.js";
 import { assert } from "./routing.js";
+export const taskRetryLimit = (quest, task) => Math.max(quest.execution.limits.retries, task.manualRetryLimit || 0);
 export const active = new Set(["RUNNING", "WAITING_INPUT", "PAUSED", "INTERRUPTED"]);
 export const claimed = new Set([
   "PREPARING",
@@ -173,7 +174,7 @@ export class TaskScheduler {
         workflowVersion: 2,
         ...this.workflow.git.identity(quest, repo),
         prTarget: repo.prTarget,
-        baseCommit: await this.workflow.git.base(repo),
+        baseCommit: quest.analysisBaselines?.find(b => b.repoId === repo.id)?.commit || await this.workflow.git.base(repo),
         state: "PREPARING",
         createdAt: now(),
         fixCycles: 0,
@@ -270,7 +271,7 @@ export class TaskScheduler {
         ),
       "Task process is still active",
     );
-    assert((task.retries || 0) < quest.execution.limits.retries, "Task retry budget exhausted");
+    assert((task.retries || 0) < taskRetryLimit(quest, task), "Task retry budget exhausted; explicitly allow one more retry before continuing");
     assert(
       !task.integratedCommit,
       "Integrated tasks require a new fix task; cannot discard integrated history",
@@ -334,6 +335,16 @@ export class TaskScheduler {
           error: error.message,
         });
         if ((current.conflictRetries || 0) >= quest.execution.limits.retries) throw error;
+        const repairState = await this.workflow.git.inspect(repo, work);
+        const pendingMerge = await this.workflow.git.command(work.path,["rev-parse","--verify","MERGE_HEAD"],true);
+        if (pendingMerge.code !== 0) {
+          assert(!repairState.dirty, "Existing integration edits require review before starting a repair; no files were discarded");
+          const integrated = await this.workflow.git.command(work.path,["merge-base","--is-ancestor",task.commit,"HEAD"],true);
+          assert(integrated.code === 0, "Integration failed without a pending merge or integrated task; inspect the original error before retrying");
+          const latest = this.workflow.e.get("works",work.id);
+          this.workflow.e.put("works",latest,{integration:{...latest.integration,
+            repairBase:{head:repairState.head,taskCommit:task.commit,clean:true}}});
+        }
         this.workflow.e.put("works", this.workflow.e.get("works", work.id), {
           conflictRetries: (current.conflictRetries || 0) + 1,
         });
@@ -371,6 +382,7 @@ export class TaskScheduler {
     const head = (await this.workflow.git.inspect(repo, work)).head;
     this.workflow.e.put("tasks", this.workflow.e.get("tasks", task.id), {
       state: "COMPLETED",
+      error: null,
       integratedCommit: head,
     });
     const done = this.workflow.e

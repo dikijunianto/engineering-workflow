@@ -591,6 +591,18 @@ test("a Developer cannot substitute an original checkout or another task workspa
   assert.equal(run.profileSnapshot.capabilities.repositories[0].path, realpathSync(dir));
   assert.equal(f.pending[0].options.accessScope.repositories.length, 1);
   await f.finish("Stop");
+  const integration = path.join(f.dir, "integration worktree");
+  mkdirSync(integration);
+  f.store.put("tasks",{...task,commit:"task-commit"});
+  f.store.put("works",{...work,path:integration,integration:{taskId:task.id,commit:"task-commit"}});
+  const conflict = {...o,purpose:"v11-conflict",cwd:integration};
+  assert.throws(()=>f.engine.launch(f.q(),{...conflict,cwd:dir}),/differs/);
+  const resolver = f.engine.launch(f.q(),conflict);
+  await Promise.resolve();
+  assert.equal(resolver.profileSnapshot.capabilities.repositories[0].path,realpathSync(integration));
+  await f.finish("Stop");
+  f.store.put("works",{...work,path:integration,integration:{taskId:"another-task",commit:"task-commit"}});
+  assert.throws(()=>f.engine.launch(f.q(),conflict),/exact pending task integration/);
 });
 
 test("snapshots survive backend restart; missing private context is actionable and prior evidence remains intact", async (t) => {
@@ -844,4 +856,37 @@ test("assigned guidance is delivered through launch and pinned in managed profil
   assert.equal(run.profileSnapshot.skills.find((pin) => pin.id === skill.id).status, "GUIDANCE_IN_PROMPT");
   assert.throws(() => f.store.put("runs", { ...run, registeredSkills: [] }), /Immutable/);
   assert.equal(f.pending.length, 1);
+});
+
+for (const profilesEnabled of [true,false]) test(`waiting Developer replies preserve retry/integration guards (profiles=${profilesEnabled})`,async t=>{
+  const f=await fixture(t,{realGit:true});await f.plan();await f.publish();
+  f.adapters.config.orchestration={models};
+  f.store.put('quests',{...f.store.get('quests',f.quest.id),workflowVersion:2,
+    execution:f.engine.v11.config({runtime:'claude',routing:{mode:'manual',model:'claude-sonnet-5-5',effort:'medium'}})});
+  if(profilesEnabled) await f.engine.action('SET_AGENT_PROFILES',{questId:f.quest.id,enabled:true});
+  for(const task of f.engine.tasks(f.quest.id))f.store.put('tasks',{...task,assessment:{taskId:task.id,complexity:'SIMPLE',risk:'LOW',recommendedModelFamily:'sonnet',recommendedEffort:'medium',reason:'Synthetic bounded work',confidence:0.9}});
+  const task=f.engine.tasks(f.quest.id)[0];
+  const resolveScope=f.engine.resolveAccessScope.bind(f.engine);
+  f.engine.resolveAccessScope=(q,o)=>{const scope=resolveScope(q,o);delete scope.readOnlyReferences;return scope;};
+  await f.engine.action('START_TASK',{questId:f.quest.id,taskId:task.id});await f.engine.v11.settled();
+  f.engine.resolveAccessScope=resolveScope;
+  await f.finish('Which error message should be preserved?',true);
+  const run=f.store.all('runs').filter(r=>r.taskId===task.id).at(-1),q=f.store.get('quests',f.quest.id);
+  assert.equal(run.state,'WAITING_INPUT');
+  f.store.put('tasks',{...f.store.get('tasks',task.id),retries:q.execution.limits.retries});
+  const reply=await f.engine.action('SEND_ROOM_REPLY',{questId:q.id,runId:run.id,requestId:'waiting-budget-reply',expectedUpdatedAt:run.updatedAt,confirmAgentRun:true,message:'Keep the old error message in the new constant'});
+  assert.equal(reply.state,'SENT');
+  const continued=f.store.all('runs').filter(r=>r.taskId===task.id).at(-1);
+  assert.equal(continued.accessScope.readOnlyReferences.filter(r=>!["go-module-cache","assigned-worktree-history"].includes(r.id)).length,1);
+  assert.equal(continued.accessScope.readOnlyReferences[0].id,f.repos[1].id);
+  if(profilesEnabled){assert.equal(continued.profileSnapshot.scopeUpgrade,'SELECTED_REPOSITORY_READ_ONLY_REFERENCES_V1');assert.equal(f.store.get('runs',run.id).profileSnapshotHash,run.profileSnapshotHash);}
+  assert.equal(f.store.get('tasks',task.id).retries,q.execution.limits.retries);
+  assert.match(f.pending[0].options.prompt,/Keep the old error message/);
+  await f.finish('Waiting for another decision',true);
+  const next=f.store.all('runs').filter(r=>r.taskId===task.id).at(-1);
+  f.store.put('tasks',{...f.store.get('tasks',task.id),integratedCommit:'integrated'});
+  await assert.rejects(f.engine.action('SEND_MESSAGE',{runId:next.id,message:'Continue'}),/Integrated tasks require a new fix task/);
+  f.store.put('tasks',{...f.store.get('tasks',task.id),integratedCommit:undefined});
+  f.store.put('runs',{...next,state:'FAILED'});
+  await assert.rejects(f.engine.action('SEND_MESSAGE',{runId:next.id,message:'Retry failure'}),/retry budget exhausted/);
 });

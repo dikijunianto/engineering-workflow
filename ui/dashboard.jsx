@@ -1,4 +1,6 @@
 export { openCreateProject } from "./create-project";
+export { openOnboarding3D, Onboarding3DModal, ONBOARDING_STAGES } from "./onboarding-3d";
+export { ProjectDetail } from "./project-detail";
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -18,6 +20,8 @@ import {
   ChevronDown,
   Clock,
   User,
+  Box,
+  Play,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/card";
 import { Button } from "./components/button";
@@ -41,8 +45,15 @@ import {
 } from "./components/dialog";
 import { Agents } from "./agents";
 import { Sidebar } from "./sidebar";
+import { ProjectDetail } from "./project-detail";
 import { Avatar, AvatarFallback } from "./components/avatar";
 import { dashboardData, projectStatus, workspaceSearch, sampleProjects } from "./model";
+import {
+  Onboarding3DModal,
+  openOnboarding3D,
+  shouldAutoOpenOnboarding,
+  ONBOARDING_STAGES,
+} from "./onboarding-3d";
 
 const date = (value) =>
   value && Number.isFinite(Date.parse(value))
@@ -152,6 +163,21 @@ function ProjectCard({ project, state, sample = false }) {
 export function Overview({ state, actions }) {
   const [filter, setFilter] = useState("all");
   const [preview, setPreview] = useState(false);
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingStage, setOnboardingStage] = useState(0);
+  useEffect(() => {
+    if (
+      shouldAutoOpenOnboarding() &&
+      typeof document !== "undefined" &&
+      !document.querySelector('dialog[open], .dq-create-project[data-state="open"]')
+    ) {
+      setOnboardingOpen(true);
+    }
+  }, []);
+  const launchOnboarding = (stageIdx = 0) => {
+    setOnboardingStage(stageIdx);
+    setOnboardingOpen(true);
+  };
   const data = dashboardData(state, filter);
   const events = [...state.events]
     .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0))
@@ -168,10 +194,20 @@ export function Overview({ state, actions }) {
             Your projects, agents and latest workspace activity.
           </p>
         </div>
-        <Button onClick={actions.newProject}>
-          <Plus />
-          New Project
-        </Button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <Button
+            variant="outline"
+            onClick={() => launchOnboarding(0)}
+            className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200"
+          >
+            <Box />
+            How DevQuest Works · 3D Tour
+          </Button>
+          <Button onClick={actions.newProject}>
+            <Plus />
+            New Project
+          </Button>
+        </div>
       </div>
       <section className="grid gap-4 sm:grid-cols-3" aria-label="Workspace metrics">
         <StatCard label="Active Projects" value={data.active} icon={Folder} href="#quests" />
@@ -183,6 +219,51 @@ export function Overview({ state, actions }) {
           href="#repositories"
         />
       </section>
+      <Card className="border-emerald-500/25 bg-card/90">
+        <CardContent className="flex flex-col justify-between gap-4 p-5 sm:flex-row sm:items-center sm:p-6">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge
+                variant="outline"
+                className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+              >
+                Interactive 3D Onboarding
+              </Badge>
+              <span className="text-xs text-muted-foreground">
+                5-Stage Gated AI Engineering Pipeline
+              </span>
+            </div>
+            <h2 className="text-base font-semibold tracking-tight">
+              Explore How DevQuest Works in 3D
+            </h2>
+            <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
+              Inspect how requirements flow through AI Architecture &amp; TRD approvals, weighted Jira publishing, 5 concurrent isolated Git worktrees, and independent production review before PR creation.
+            </p>
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              {ONBOARDING_STAGES.slice(1).map((stg, idx) => (
+                <button
+                  key={stg.id}
+                  type="button"
+                  onClick={() => launchOnboarding(idx + 1)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/90 px-2.5 py-1 text-xs font-medium text-zinc-300 transition-colors hover:border-emerald-500/40 hover:text-emerald-300"
+                >
+                  <span className="font-mono text-[10px] text-emerald-400">{stg.stepNumber}</span>
+                  <span>{stg.shortTitle.replace(/^\d+\.\s*/, "")}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              onClick={() => launchOnboarding(0)}
+              className="bg-emerald-400 font-semibold text-zinc-950 hover:bg-emerald-300"
+            >
+              <Play className="size-4" />
+              Launch 3D Tour
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.85fr)_minmax(0,1fr)]">
         <Card className="min-w-0 border-border/50 bg-card">
           <Tabs value={filter} onValueChange={setFilter}>
@@ -315,6 +396,7 @@ export function Overview({ state, actions }) {
             </CardHeader>
             <CardContent className="space-y-1 px-3 pb-3">
               {[
+                [Box, "3D Workflow Guide", () => launchOnboarding(0)],
                 [FolderInput, "Import Repository", actions.addRepository],
                 [Bot, "Deploy New Agent", () => go("#agents")],
                 [Link, "Link Jira Board", actions.jiraSettings],
@@ -337,10 +419,17 @@ export function Overview({ state, actions }) {
           </Card>
         </div>
       </div>
+      <Onboarding3DModal
+        open={onboardingOpen}
+        onOpenChange={setOnboardingOpen}
+        state={state}
+        actions={actions}
+        initialStage={onboardingStage}
+      />
     </div>
   );
 }
-function Header({ state }) {
+function Header({ state, actions = {} }) {
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [notifications, setNotifications] = useState(false);
@@ -372,6 +461,16 @@ function Header({ state }) {
   );
   return (
     <div className="dq-header flex items-center gap-2">
+      <Button
+        variant="outline"
+        size="sm"
+        className="h-9 gap-1.5 border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200"
+        onClick={() => openOnboarding3D({ state, actions })}
+        aria-label="Open 3D Workflow Guide"
+      >
+        <Box className="size-3.5" />
+        <span className="hidden md:inline">3D Tour</span>
+      </Button>
       <Button
         variant="outline"
         className="h-9 gap-2 border-border bg-background text-muted-foreground sm:w-56 sm:justify-start"
@@ -409,6 +508,10 @@ function Header({ state }) {
         <DropdownMenuContent align="end" className="dq-popup w-52">
           <DropdownMenuLabel>Local workspace</DropdownMenuLabel>
           <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={() => openOnboarding3D({ state, actions })}>
+            <Box className="mr-2 size-4 text-emerald-400" />
+            3D Workflow Guide
+          </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => go("#settings")}>
             <Settings className="mr-2 size-4" />
             Settings & integrations
@@ -498,17 +601,21 @@ export function setConnection(connected) {
   if (sidebarRoot && sidebarProps)
     sidebarRoot.render(<Sidebar {...sidebarProps} connected={connected} />);
 }
-export function updateDashboard(state, actions, { route = "home", restartRequired = false } = {}) {
+export function updateDashboard(
+  state,
+  actions,
+  { route = "home", id = "", tab = "overview", focusDocument = "", restartRequired = false } = {},
+) {
   const sidebar = document.getElementById("sidebar-content");
   if (sidebar) {
     sidebarRoot ||= createRoot(sidebar);
-    sidebarProps = { state, route, restartRequired };
+    sidebarProps = { state, actions, route, restartRequired };
     sidebarRoot.render(<Sidebar {...sidebarProps} connected={engineConnected} />);
   }
   const header = document.getElementById("dashboard-header");
   if (header) {
     headerRoot ||= createRoot(header);
-    headerRoot.render(<Header state={state} />);
+    headerRoot.render(<Header state={state} actions={actions} />);
   }
   const target = document.getElementById("dashboard-root");
   if (target) {
@@ -516,6 +623,14 @@ export function updateDashboard(state, actions, { route = "home", restartRequire
     overviewRoot.render(
       route === "agents" ? (
         <Agents state={state} actions={actions} />
+      ) : route === "quest" ? (
+        <ProjectDetail
+          state={state}
+          actions={actions}
+          questId={id}
+          tab={tab}
+          focusDocument={focusDocument}
+        />
       ) : (
         <Overview state={state} actions={actions} />
       ),

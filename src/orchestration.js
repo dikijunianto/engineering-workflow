@@ -1,5 +1,5 @@
 import { id } from "./store.js";
-import { TaskScheduler, active, claimed, processExists } from "./scheduler.js";
+import { TaskScheduler, active, claimed, processExists, taskRetryLimit } from "./scheduler.js";
 import { assert, executionConfig, resolveRoute } from "./routing.js";
 import { finishAgentRun } from "./agent-results.js";
 import { ProductionReview } from "./production-review.js";
@@ -13,6 +13,7 @@ const handled = new Set([
   "START_TASK",
   "PAUSE_QUEST",
   "RETRY_TASK",
+  "ALLOW_TASK_RETRY",
   "CANCEL_TASK",
   "ESCALATE_TASK",
   "RUN_TEST",
@@ -215,6 +216,19 @@ export class Orchestration {
       this.e.publicationInput(quest, p);
       return this.background(`jira:${quest.id}`, quest.id, () => this.e.dispatch(type, p, true));
     }
+    if (type === "ALLOW_TASK_RETRY") {
+      const task = this.e.get("tasks", p.taskId);
+      assert(task.questId === quest.id, "Task belongs to another Quest");
+      assert(p.confirmed === true, "Confirm the additional retry allowance");
+      assert(!task.integratedCommit && ["FAILED","INTERRUPTED","CANCELLED","NEEDS_HUMAN_ATTENTION"].includes(task.state), "Only stopped, unintegrated tasks can receive another retry");
+      assert(!this.s.all("runs").some(r=>r.taskId===task.id && (active.has(r.state) || this.e.jobs.has(r.id) || processExists(r.pid))) && !this.pending.has(`task:${task.id}`), "Stop the task operation before changing its retry allowance");
+      const limit=taskRetryLimit(quest,task);
+      assert(p.expectedRetries === (task.retries || 0) && p.expectedLimit === limit, "Retry state changed; reload and review the allowance");
+      assert((task.retries || 0) >= limit && limit < 10, "Retry allowance is not exhausted or has reached its maximum of 10");
+      this.e.put("tasks",task,{manualRetryLimit:limit+1});
+      this.e.log(quest.id,`${task.key}: human allowed one additional retry (${limit} → ${limit+1}); no agent started`);
+      return;
+    }
     if (type === "SET_QUEST_EXECUTION") {
       const execution = this.config(p.execution);
       assert(
@@ -262,11 +276,11 @@ export class Orchestration {
         );
         if (run.taskId) {
           const task = this.e.get("tasks", run.taskId);
-          assert(
-            !task.integratedCommit && (task.retries || 0) < quest.execution.limits.retries,
-            "Integrated task or retry budget exhausted",
-          );
-          this.e.put("tasks", task, { retries: (task.retries || 0) + 1 });
+          assert(!task.integratedCommit, "Integrated tasks require a new fix task; cannot continue integrated history");
+          if (run.state !== "WAITING_INPUT") {
+            assert((task.retries || 0) < taskRetryLimit(quest, task), "Task retry budget exhausted; allow one more retry for this task before replying. Waiting-input answers do not consume retries");
+            this.e.put("tasks", task, { retries: (task.retries || 0) + 1 });
+          }
         }
         assert(
           run.role !== "developer" ||
@@ -274,6 +288,11 @@ export class Orchestration {
           "Developer agent limit reached",
         );
         return this.e.runAction(type, p);
+      }
+      if (run.taskId && run.state === "WAITING_INPUT") {
+        assert(!this.e.get("tasks",run.taskId).integratedCommit, "Integrated tasks require a new fix task; cannot continue integrated history");
+        assert(this.developerSlots().length < Math.min(5,quest.execution.limits.developers), "Developer agent limit reached");
+        return this.e.runAction(type,p);
       }
       if (run.taskId)
         return this.retry(
@@ -453,7 +472,8 @@ export class Orchestration {
       return;
     }
     if (type === "CREATE_PR") {
-      this.background(`pr:${work.id}`, quest.id, () => this.createPr(quest, work, p.reviewers));
+      this.background(`pr:${work.id}`, quest.id, () => this.createPr(quest, work, p.reviewers),
+        error=>this.e.put("works",this.e.get("works",work.id),{error:`Pull request creation failed: ${error.message}`}));
       return;
     }
     throw new Error("Invalid v1.1 action");

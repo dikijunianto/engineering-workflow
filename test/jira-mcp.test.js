@@ -28,6 +28,9 @@ async function stub(
     absentField,
     spill,
     escapeSpill,
+    spillText,
+    oversizeSpill,
+    wrongSpillName,
     truncated,
     publication,
   } = {},
@@ -119,7 +122,7 @@ async function stub(
       }).then((r) => r.json());
       let content = remote.result.content;
       if (
-        (spill || escapeSpill || truncated) &&
+        (spill || escapeSpill || spillText || oversizeSpill || wrongSpillName || truncated) &&
         call.name.endsWith("getJiraIssueTypeMetaWithFields")
       ) {
         if (truncated)
@@ -135,8 +138,8 @@ async function stub(
             "tool-results",
           );
           await mkdir(root, { recursive: true });
-          const file = path.join(escapeSpill ? configDirectory : root, call.id + ".json");
-          await writeFile(file, JSON.stringify(content));
+          const file = path.join(escapeSpill ? configDirectory : root, (wrongSpillName ? "other-tool" : call.id) + (spillText ? ".txt" : ".json"));
+          await writeFile(file, oversizeSpill ? " ".repeat(2000001) : JSON.stringify(content));
           content = `<persisted-output>\nFull output saved to: ${file}\nPreview omitted`;
         }
       }
@@ -228,6 +231,9 @@ test("app-owned MCP hook denies every non-read operation for generation before d
 test("spilled native MCP output is read only from the owned session; escapes/truncation are rejected", async (t) => {
   for (const [config, expected] of [
     [{ spill: true }, null],
+    [{ spillText: true }, null],
+    [{ oversizeSpill: true }, /exceeds the 2 MB/],
+    [{ wrongSpillName: true }, /unexpected tool filename/],
     [{ escapeSpill: true }, /outside this preflight/],
     [{ truncated: true }, /response was truncated/],
   ]) {

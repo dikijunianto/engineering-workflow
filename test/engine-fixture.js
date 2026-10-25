@@ -90,6 +90,7 @@ export async function fixture(t, { realGit = false } = {}) {
   };
   const store = new Store(path.join(dir, "data")),
     engine = new Engine({ store, adapters });
+  if (!realGit) engine.v11.git.analysisSnapshot = async (quest,repo) => ({repoId:repo.id,branch:repo.baseBranch || "development",remote:"origin",commit:"a".repeat(40),path:repo.path});
   await engine.initialize();
   t.after(async () => {
     await engine.close();
@@ -109,6 +110,7 @@ export async function fixture(t, { realGit = false } = {}) {
       );
       git(repoPath, "add", ".");
       git(repoPath, "commit", "-m", "initial");
+      git(repoPath, "remote", "add", "origin", repoPath);
     }
     repos.push(await engine.action("REGISTER_REPOSITORY", { path: repoPath }));
   }

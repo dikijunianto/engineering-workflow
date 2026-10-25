@@ -1,7 +1,7 @@
 import http from "node:http";
 import { randomBytes } from "node:crypto";
 import path from "node:path";
-import { realpath, open } from "node:fs/promises";
+import { realpath, open, stat, readdir } from "node:fs/promises";
 import { preflightAccess } from "./access.js";
 
 // Codex receives only this read tool; no shell or writable additional directories.
@@ -19,7 +19,7 @@ export async function createRepositoryReader(scope, onCall = () => {}) {
       openWorldHint: false,
     },
     description:
-      "Read a UTF-8 file inside one selected repository using its repoId and relative path. No directory discovery or writes.",
+      "Read a UTF-8 file or list immediate directory entries inside an authorized reference using repoId and relative path. Use path '.' for its root. No writes or parent traversal.",
     inputSchema: {
       type: "object",
       properties: { repoId: { type: "string" }, path: { type: "string" } },
@@ -44,8 +44,9 @@ export async function createRepositoryReader(scope, onCall = () => {}) {
       );
     const target = await realpath(path.join(repo.canonicalPath, input.path));
     const relative = path.relative(repo.canonicalPath, target);
+    if (repo.allowedFiles && !repo.allowedFiles.includes(relative))
+      throw new Error("Access denied: only the explicitly granted reference files may be read");
     if (
-      !relative ||
       relative === ".." ||
       relative.startsWith(`..${path.sep}`) ||
       path.isAbsolute(relative)
@@ -53,6 +54,11 @@ export async function createRepositoryReader(scope, onCall = () => {}) {
       throw new Error(
         "Access denied: resolved path is outside the selected repository root",
       );
+    if ((await stat(target)).isDirectory()) {
+      const entries = await readdir(target, {withFileTypes:true});
+      return entries.slice(0,500).map(e=>`${e.name}${e.isDirectory()?"/":e.isSymbolicLink()?" (symlink)":""}`).join("\n") +
+        (entries.length>500 ? "\nListing truncated to 500 entries; select a subdirectory." : "");
+    }
     const file = await open(target, "r");
     try {
       const info = await file.stat();

@@ -42,7 +42,7 @@ const icons = {
   reviewer: ShieldCheck,
   "jira-specialist": Ticket,
 };
-const runtimeName = (key) => (key === "claude" ? "Claude Code" : "Codex CLI");
+const runtimeName = (key) => key === "skill-bridge" ? "Local skill bridge" : (key === "claude" ? "Claude Code" : "Codex CLI");
 const control = "mt-3 h-9 w-full rounded-md border border-input bg-zinc-950 px-3 py-1 text-sm";
 function Status({ children, working = false }) {
   return (

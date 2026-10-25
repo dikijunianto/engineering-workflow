@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { jiraContext } from "./jira-project.js";
 import { modelId, resolveRoute } from "./routing.js";
 
@@ -17,6 +18,22 @@ const fields = [
   "backendWeights",
   "metadataPreferences",
 ];
+
+export function approvalBasisMatches(recorded, current) {
+  try {
+    const normalize = value => {
+      const basis = JSON.parse(value);
+      if (basis.jiraConfig) {
+        delete basis.jiraConfig.origins;
+        delete basis.jiraConfig.createdAt;
+      }
+      return basis;
+    };
+    return isDeepStrictEqual(normalize(recorded), normalize(current));
+  } catch {
+    return false;
+  }
+}
 
 export function projectSettings(input) {
   const context = jiraContext(input);
@@ -278,7 +295,14 @@ export class JiraSettings {
       quest.repositoryIds,
       refresh ? { jiraContext: { project: input.project || quest.jiraContext?.project } } : quest,
     );
-    return this.e.put("quests", quest, { ...result, jiraMetadata: null, autoExecute: false });
+    const unchanged = approvalBasisMatches(
+      JSON.stringify({ jiraContext: quest.jiraContext, jiraConfig: quest.jiraConfig }),
+      JSON.stringify(result),
+    );
+    return this.e.put("quests", quest, {
+      ...result, jiraMetadata: unchanged ? quest.jiraMetadata : null,
+      autoExecute: false,
+    });
   }
   route(quest) {
     const base = quest.execution || this.e.v11.config();
@@ -317,10 +341,11 @@ export class JiraSettings {
   }
   validationOptions(quest) {
     if (!quest.jiraConfig?.enabled || quest.jiraConfig.categoryFamily === "ALL") return undefined;
-    check(
-      quest.jiraMetadata,
-      "Generate with verified project metadata before saving or approving this Appendix",
-    );
-    return this.e.store.metadataContent(quest.jiraMetadata).selectedOptions;
+    const artifact = this.e.store.latest(quest.id, "appendix");
+    // Older settings saves cleared this pointer even when only provenance changed.
+    const metadata = quest.jiraMetadata ||
+      (artifact && this.e.hasApproval(quest.id, "appendix", artifact) ? artifact.jiraMetadata : null);
+    check(metadata, "Generate with verified project metadata before saving or approving this Appendix");
+    return this.e.store.metadataContent(metadata).selectedOptions;
   }
 }

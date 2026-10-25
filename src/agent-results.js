@@ -200,7 +200,17 @@ export function finishAgentRun(workflow, run, result) {
           const current = workflow.e.get("works", work.id);
           if (run.purpose === "v11-conflict") {
             const task = workflow.e.get("tasks", current.integration.taskId);
-            await workflow.git.integrate(repo, current, task);
+            let validatedRepair;
+            if (current.integration.repairBase) {
+              assert(current.integration.repairBase.taskCommit === task.commit,
+                "Integration repair baseline belongs to another task commit");
+              const profiles = [...new Set(workflow.e.tasks(quest.id).filter(t=>t.repoId===repo.id).map(t=>t.validationProfile))];
+              for (const profile of profiles) {
+                validatedRepair = await workflow.validate(repo,current,profile);
+                assert(validatedRepair.passed, `Integration repair validation failed: ${validatedRepair.summary}`);
+              }
+            }
+            await workflow.git.integrate(repo, current, task, validatedRepair);
             await workflow.finishIntegration(
               quest,
               workflow.e.get("works", work.id),

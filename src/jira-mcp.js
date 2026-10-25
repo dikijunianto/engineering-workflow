@@ -218,15 +218,13 @@ export async function preflightJiraMcp({
     );
     const canonicalRoot = await realpath(root),
       target = await realpath(file);
-    if (
-      path.dirname(target) !== canonicalRoot ||
-      path.basename(target) !== toolId + ".json" ||
-      !(await lstat(target)).isFile() ||
-      (await lstat(target)).size > 2000000
-    )
-      throw new Error(
-        "MCP output artifact is outside this preflight's owned session or exceeds the size limit",
-      );
+    if (path.dirname(target) !== canonicalRoot ||
+        ![toolId + ".json", toolId + ".txt"].includes(path.basename(target)))
+      throw new Error("MCP output artifact is outside this preflight's owned session or has an unexpected tool filename");
+    const info = await lstat(target);
+    if (!info.isFile()) throw new Error("MCP output artifact is not a regular file");
+    if (info.size > 2000000)
+      throw new Error("MCP output artifact exceeds the 2 MB preflight size limit; narrow or paginate the Jira response");
     return JSON.parse(await readFile(target, "utf8"));
   };
   const secretPath = "/" + randomUUID();

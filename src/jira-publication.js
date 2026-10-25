@@ -2,13 +2,23 @@ import { hash } from "./store.js";
 import { validateAppendix } from "./appendix-markdown.js";
 import { assert } from "./routing.js";
 
+export function acceptsAccountVisibleSearch(quest, artifact) {
+    const acceptance = quest.jiraSearchScopeAcceptance;
+    return acceptance?.scope === "account-visible" &&
+      acceptance.artifactId === artifact.id && acceptance.artifactHash === artifact.hash &&
+      acceptance.project === quest.jiraContext.project &&
+      acceptance.siteUrl === new URL(quest.jiraContext.siteUrl).origin &&
+      acceptance.epic === (quest.jiraContext.epic || "");
+  }
+
 export function appendixTaskMapping(markdown, tasks) {
   const cards = validateAppendix(markdown),
     mapping = new Map(cards.map((c) => [c.id, []]));
   const rows = markdown.split(/\r?\n/);
   let columns,
     traceabilityTable = false;
-  for (const row of rows) {
+  for (const line of rows) {
+    const row = line.trim();
     if (!row.startsWith("|")) {
       columns = undefined;
       continue;
@@ -17,14 +27,20 @@ export function appendixTaskMapping(markdown, tasks) {
       .slice(1, row.lastIndexOf("|"))
       .split("|")
       .map((s) => s.replace(/[`*]/g, "").trim());
-    if (cells.includes("Plan execution ID") && cells.includes("Jira card(s)")) {
+    const cardColumn = cells.findIndex(cell => ["Jira card(s)", "Jira cards"].includes(cell));
+    if (cells.includes("Plan execution ID") && cardColumn !== -1) {
       traceabilityTable = true;
-      columns = [cells.indexOf("Plan execution ID"), cells.indexOf("Jira card(s)")];
+      columns = [cells.indexOf("Plan execution ID"), cardColumn];
       continue;
     }
-    if (!columns || !/^[A-Za-z][\w-]*$/.test(cells[columns[0]] || "")) continue;
-    const task = tasks.find((t) => t.key === cells[columns[0]]);
-    assert(task, `Mapping review required: unknown execution reference ${cells[columns[0]]}`);
+    if (!columns || cells.every(cell => /^:?-+:?$/.test(cell))) continue;
+    const reference = cells[columns[0]] || "";
+    const identity = reference.match(/^([A-Za-z0-9][\w-]*)(?:\s+\(([\w-]+)\))?$/);
+    const matches = identity ? tasks.filter(task => identity[2]
+      ? task.id === identity[1] && task.key === identity[2]
+      : task.id === identity[1] || task.key === identity[1]) : [];
+    assert(matches.length === 1, `Mapping review required: unknown or ambiguous execution reference ${reference}`);
+    const task = matches[0];
     const expanded = cells[columns[1]].replace(
       /(T[\w-]+\.)(\d+)\s*[–-]\s*\1(\d+)/g,
       (_, prefix, a, b) => {
@@ -177,7 +193,8 @@ export class JiraPublication {
         old.artifactId === artifact.id && old.artifactHash === artifact.hash,
         "Approved appendix changed; reconcile the existing publication manifest before publishing a modified revision",
       );
-      return old;
+      // Mapping failures happen before any write; retry only their empty manifests.
+      if (old.state !== "MAPPING_REVIEW" || old.entries?.length) return old;
     }
     const plan = this.e.approved(quest.id, "plan"),
       trd = this.e.approved(quest.id, "trd");
@@ -199,8 +216,8 @@ export class JiraPublication {
       trdArtifactId: trd.id,
       trdHash: trd.hash,
       metadataHash: (artifact.jiraMetadata || quest.jiraMetadata).hash,
-      appendixIdempotencyPrefix: `devquest:${quest.id}:appendix:`,
-      createdAt: new Date().toISOString(),
+      appendixIdempotencyPrefix: old?.appendixIdempotencyPrefix || `devquest:${quest.id}:appendix:`,
+      createdAt: old?.createdAt || new Date().toISOString(),
       entries: [],
     };
     this.s.put("operations", base);
@@ -259,6 +276,9 @@ export class JiraPublication {
       skillPaths: this.e.adapters.config?.workflow?.skills || {},
     };
   }
+  acceptsAccountVisibleSearch(quest, artifact) {
+    return acceptsAccountVisibleSearch(quest, artifact);
+  }
   requireReady(quest, artifact) {
     const manifest = this.get(quest.id);
     assert(
@@ -274,6 +294,8 @@ export class JiraPublication {
         manifest.epic === quest.jiraContext.epic,
       "Publication manifest no longer matches the approved revision or Jira target",
     );
+    assert(manifest.visibilityScope !== "account-visible" || this.acceptsAccountVisibleSearch(quest, artifact),
+      "Account-visible Jira search acceptance changed; prepare publication again");
     return manifest;
   }
   async prepare(quest, artifact, coordinated = false) {
@@ -364,17 +386,21 @@ export class JiraPublication {
         };
       });
       assert(
-        search.visibilityVerified,
+        search.visibilityVerified || this.acceptsAccountVisibleSearch(quest, artifact),
         "Jira search pagination completed, but issue-security visibility is user-scoped and not independently verified. Publication remains blocked; supply a read-only integration that can attest complete project issue visibility",
       );
       manifest = this.s.put("operations", {
         ...manifest,
         state: "READY",
         error: "",
+        visibilityScope: search.visibilityVerified ? "project-complete" : "account-visible",
+        visibilityWarning: search.visibilityVerified ? "" : "Only issues visible to your Jira account were checked. Hidden issues may contain duplicates; complete project visibility was not verified.",
+        visibilityAcceptance: search.visibilityVerified ? null : quest.jiraSearchScopeAcceptance,
         verifiedMetadataVersion: hash(JSON.stringify(proof)),
         manifestHash: hash(JSON.stringify(manifest.entries)),
       });
       this.recordResults(manifest, []);
+      this.e.saveTickets(quest);
       return manifest;
     } catch (error) {
       if (error.jiraReadEvidence?.length) {

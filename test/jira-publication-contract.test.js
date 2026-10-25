@@ -81,6 +81,17 @@ test("explicit source references map appendix identities independently of numeri
   );
 });
 
+test("indented skill tables accept Jira cards and exact execution IDs with matching task keys", () => {
+  const tasks = [{id:"quest-uuid_T1",key:"T1"}];
+  const table = "   | Plan execution ID | Repo | Jira cards | Plan dependencies |\n   |---|---|---|---|\n   | `quest-uuid_T1` (T1) | FTS | T1.1 | — |\n\n";
+  const document = markdown.replace("### 6.5",table+"### 6.5");
+  assert.deepEqual(appendixTaskMapping(document,tasks)[0].executionTaskIds,["quest-uuid_T1"]);
+  for (const invalid of [document.replace("(T1)","(T2)"),document.replace("quest-uuid_T1","other-quest_T1"),document.replace("T1.1 |","T1.99 |")]) {
+    assert.throws(()=>appendixTaskMapping(invalid,tasks),/Mapping review required/);
+  }
+  assert.throws(()=>appendixTaskMapping(document,[...tasks,...tasks]),/ambiguous execution/);
+});
+
 test("reconciliation requires complete search; duplicate markers, pagination errors, lost mappings and failures never become no-match", () => {
   const manifest = {
     project: "FFE",
@@ -199,7 +210,11 @@ test("verified existing issues reconcile into execution mappings; partial and un
   assert.equal(task.jira.issues.length, 1);
   assert.equal(task.jira.complete, true);
   assert.equal(task.jira.url, "https://jira.example/browse/FFE-11");
+  const ticket = f.store.latest(f.quest.id, "ticket");
+  assert.match(f.store.content(ticket), /FFE-11/);
+  assert.match(f.store.content(ticket), /Mapping: complete/);
   await f.engine.publication.prepare(f.quest, f.artifact);
+  assert.equal(f.store.latest(f.quest.id, "ticket").id, ticket.id);
   assert.equal(f.engine.tasks(f.quest.id).find((t) => t.id === task.id).jira.issues.length, 1);
   assert.throws(
     () =>
@@ -340,4 +355,107 @@ test("profile-enabled publishing retains existing readiness gates and records a 
   const op = f.store.get("operations", "jira-publish:" + q.id);
   assert.equal(op.profileSnapshotHash, hash(JSON.stringify(op.profileSnapshot)));
   assert.equal(op.profileSnapshot.readOnly, true);
+});
+
+
+test("retry an empty failed mapping manifest without changing its namespace or existing publication entries", async t => {
+  const f=await setup(t);
+  const initial=f.engine.publication.resolve(f.quest,f.artifact);
+  const failed={...initial,state:"MAPPING_REVIEW",entries:[],error:"Historical parser failure",appendixIdempotencyPrefix:"devquest:stable-original:appendix:"};
+  f.store.put("operations",failed);
+  const recovered=f.engine.publication.resolve(f.quest,f.artifact);
+  assert.equal(recovered.entries.length,1);
+  assert.equal(recovered.createdAt,initial.createdAt);
+  assert.equal(recovered.appendixIdempotencyPrefix,failed.appendixIdempotencyPrefix);
+  assert.equal(recovered.entries[0].marker,failed.appendixIdempotencyPrefix+"T1.1");
+  assert.equal(recovered.state,"BLOCKED");
+  assert.equal(recovered.error,undefined);
+  assert.equal(recovered.entries[0].issueKey,undefined);
+  const started={...recovered,state:"MAPPING_REVIEW",entries:[{...recovered.entries[0],issueKey:"FFE-123"}]};
+  f.store.put("operations",started);
+  assert.deepEqual(f.engine.publication.resolve(f.quest,f.artifact),started);
+});
+
+test("explicit account-visible acceptance permits preparation for only the approved revision and exposes the limitation", async t => {
+  const f=await setup(t);
+  f.proof.searchPages[0].visibilityComplete=false;
+  await assert.rejects(f.engine.publication.prepare(f.quest,f.artifact),/visibility/);
+  await assert.rejects(f.engine.action("SET_JIRA_SEARCH_SCOPE",{questId:f.quest.id,artifactId:"old",scope:"account-visible"}),/revision changed/);
+  await f.engine.action("SET_JIRA_SEARCH_SCOPE",{questId:f.quest.id,artifactId:f.artifact.id,scope:"account-visible"});
+  const quest=f.store.get("quests",f.quest.id);
+  const result=await f.engine.publication.prepare(quest,f.artifact);
+  assert.equal(result.state,"READY");
+  assert.equal(result.visibilityScope,"account-visible");
+  assert.match(result.visibilityWarning,/Hidden issues may contain duplicates/);
+  assert.equal(result.verifiedCapabilities.searchPages[0].visibilityComplete,false);
+  assert.equal(result.visibilityAcceptance.artifactHash,f.artifact.hash);
+  assert.equal(result.entries.filter(e=>e.issueKey).length,0);
+  const preview=await f.engine.action("PREVIEW_JIRA_PUBLICATION",{questId:quest.id,appendixArtifactId:f.artifact.id});
+  assert.equal(preview.visibilityWarning,result.visibilityWarning);
+  assert.equal(f.engine.snapshot().artifacts.find(a=>a.id===f.artifact.id).publicationWarning,result.visibilityWarning);
+  assert.equal(f.engine.publication.acceptsAccountVisibleSearch({...quest,jiraContext:{...quest.jiraContext,epic:"FFE-2"}},f.artifact),false);
+  assert.equal(f.engine.publication.acceptsAccountVisibleSearch(quest,{...f.artifact,hash:"changed"}),false);
+  assert.equal(f.engine.publication.acceptsAccountVisibleSearch(quest,{...f.artifact,id:"new"}),false);
+  await f.engine.action("SET_JIRA_SEARCH_SCOPE",{questId:quest.id,artifactId:f.artifact.id,scope:"project-complete"});
+  assert.throws(()=>f.engine.publication.requireReady(f.store.get("quests",quest.id),f.artifact),/acceptance changed/);
+});
+
+test("account-visible scope still blocks incomplete search, duplicate markers and API failures", async t => {
+  for (const mode of ["pagination","duplicate","failure"]) await t.test(mode,async t=>{
+    const f=await setup(t);
+    await f.engine.action("SET_JIRA_SEARCH_SCOPE",{questId:f.quest.id,artifactId:f.artifact.id,scope:"account-visible"});
+    const quest=f.store.get("quests",f.quest.id);
+    f.proof.searchPages[0].visibilityComplete=false;
+    if(mode==="pagination")f.proof.searchPages[0].total=1;
+    if(mode==="duplicate"){
+      const marker=`devquest:${quest.id}:appendix:T1.1`;
+      f.proof.searchPages[0].issues=[issue("FFE-1",marker),issue("FFE-2",marker)];f.proof.searchPages[0].total=2;
+    }
+    if(mode==="failure")f.adapters.skill.preflightPublication=async()=>{throw new Error("Permission denied")};
+    await assert.rejects(f.engine.publication.prepare(quest,f.artifact));
+    assert.equal(f.engine.publication.get(quest.id).state,"BLOCKED");
+  });
+});
+
+
+test("publisher validation failure is visible, preserves history, and allows an explicit fresh attempt", async t=>{
+  const f=await setup(t);await f.engine.publication.prepare(f.quest,f.artifact);
+  f.adapters.skill.publish=async()=>{const error=new Error("Synthetic input rejected before runtime start");error.publisherNotStarted=true;throw error;};
+  const input={questId:f.quest.id,appendixArtifactId:f.artifact.id};
+  await assert.rejects(f.engine.action("PUBLISH_JIRA",input),/Synthetic input/);
+  const failed=f.store.all("runs").find(r=>r.purpose==="jira_publish");
+  assert.equal(failed.state,"FAILED");assert.equal(failed.phase,"VALIDATION_FAILED");
+  assert.equal(failed.publisherStarted,false);assert.match(failed.summary,/Synthetic input/);
+  assert.equal(failed.skill,"devquest-jira:upload-task-to-jira");
+  assert.equal(f.engine.publication.get(f.quest.id).state,"READY");
+  assert.equal(f.store.get("operations",`jira-publish:${f.quest.id}`).state,"FAILED_NOT_STARTED");
+  assert.ok((await f.engine.action("PREVIEW_JIRA_PUBLICATION",input)).artifactId);
+  await assert.rejects(f.engine.action("CONTINUE_AGENT",{runId:failed.id}),/publication cannot continue/);
+  f.adapters.skill.publish=async input=>{
+    const running=f.store.all("runs").filter(r=>r.purpose==="jira_publish").at(-1);
+    assert.equal(running.state,"RUNNING");assert.equal(running.phase,"VALIDATING");
+    input.onDispatch();input.onEvent({type:"process",pid:99999999});
+    input.onEvent({type:"native-skill",skill:"devquest-jira:upload-task-to-jira"});
+    input.onEvent({type:"output",text:"Synthetic live publishing progress"});
+    const visible=f.engine.snapshot().runs.find(r=>r.id===running.id);
+    assert.equal(visible.skillInvoked,true);assert.match(visible.output,/live publishing progress/);
+    return [{taskId:input.tasks[0].id,appendixTaskId:"T1.1",key:"FFE-777"}];
+  };
+  await f.engine.action("PUBLISH_JIRA",input);
+  const runs=f.store.all("runs").filter(r=>r.purpose==="jira_publish");
+  assert.equal(runs.length,2);assert.equal(runs[0].state,"FAILED");assert.equal(runs[1].state,"COMPLETED");
+  assert.equal(runs[1].publisherStarted,true);assert.equal(runs[1].pid,null);assert.equal(f.engine.jobs.size,0);
+});
+
+test("failure after publisher dispatch remains uncertain and cannot auto-retry", async t=>{
+  const f=await setup(t);await f.engine.publication.prepare(f.quest,f.artifact);
+  f.adapters.skill.publish=async input=>{input.onDispatch();throw new Error("Synthetic lost connection after dispatch")};
+  const input={questId:f.quest.id,appendixArtifactId:f.artifact.id};
+  await assert.rejects(f.engine.action("PUBLISH_JIRA",input),/lost connection/);
+  const run=f.store.all("runs").find(r=>r.purpose==="jira_publish");
+  assert.equal(run.state,"FAILED");assert.equal(run.publisherStarted,true);
+  assert.equal(f.store.get("operations",`jira-publish:${f.quest.id}`).state,"UNCERTAIN");
+  assert.equal(f.engine.publication.get(f.quest.id).state,"UNCERTAIN");
+  await assert.rejects(f.engine.action("PUBLISH_JIRA",input));
+  assert.equal(f.store.all("runs").filter(r=>r.purpose==="jira_publish").length,1);
 });

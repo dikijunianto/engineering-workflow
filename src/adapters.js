@@ -1,3 +1,4 @@
+import { acceptsAccountVisibleSearch, reconcileIssueSearch } from "./jira-publication.js";
 import { mcpGuardSettings, jiraMetadataReads, jiraPublishReads } from "./jira-mcp-policy.js";
 import { preflightJiraMcp, sanitizeMcpError } from "./jira-mcp.js";
 import { jiraContext, verifyJiraProject, jiraObjects, jiraIssuePage } from "./jira-project.js";
@@ -27,8 +28,19 @@ import {
   verifyClaudeGrants,
 } from "./access.js";
 import { createRepositoryReader } from "./repository-reader.js";
+import { connectBitbucketMcp } from "./bitbucket-mcp.js";
 import { FolderPicker } from "./folder-picker.js";
 import { assertProfileInvocation } from "./agent-context.js";
+
+export function parsePublisherResponse(text) {
+  const content = String(text).trim();
+  try { return JSON.parse(content); } catch {}
+  const blocks = [...content.matchAll(/^```json[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm)];
+  if (blocks.length !== 1)
+    throw new Error("Publisher response must contain one unambiguous JSON result block; reconcile Jira before retrying");
+  try { return JSON.parse(blocks[0][1]); }
+  catch { throw new Error("Publisher JSON result block is invalid; reconcile Jira before retrying"); }
+}
 
 const DIFF_LIMIT = 200_000;
 const OUTPUT_LIMIT = 100_000;
@@ -512,7 +524,7 @@ class GitAdapter {
         result.code === 0 &&
         !(["node-test", "npm-test"].includes(profile) && /(?:#|ℹ) tests 0\b/.test(result.stdout)),
       summary: bounded(
-        redact([result.stdout, result.stderr].filter(Boolean).join("\n").trim(), this.testEnv),
+        redact((result.code !== 0 ? [result.stderr, result.stdout] : [result.stdout, result.stderr]).filter(Boolean).join("\n").trim(), this.testEnv),
         SUMMARY_LIMIT,
       ),
     };
@@ -681,6 +693,7 @@ export class AgentRuntime {
     mcpGuard,
     localApiUrl,
     appendixMetadata,
+    repositoryReference,
     profileSnapshot,
     profileSnapshotHash,
     runtimeProvider,
@@ -748,6 +761,7 @@ export class AgentRuntime {
         nativeSkill,
         skillPluginDir,
         mcpGuard,
+        repositoryReference,
       });
       if (preflight && this.name === "Claude Code")
         preflight.permittedDirectories = verifyClaudeGrants(args, preflight);
@@ -797,6 +811,8 @@ export class AgentRuntime {
     let waitingInput = false;
     let failure;
     let accessFailure;
+    const referenceDenials = new Map();
+    const referenceReads = new Set();
     let actualModel, usage;
     const toolPaths = new Map();
     const consumeLine = (line) => {
@@ -932,10 +948,17 @@ export class AgentRuntime {
                 operation: block.name,
                 target,
                 pattern,
+                reference: block.name === "mcp__devquest_repository__ReadRepositoryFile"
+                  ? block.input : undefined,
               });
           }
           if (block.type === "tool_result") {
             const tool = toolPaths.get(block.tool_use_id);
+            if (!block.is_error && tool?.reference) {
+              const ref = accessScope.readOnlyReferences?.find(r => r.id === tool.reference.repoId);
+              if (ref && typeof tool.reference.path === "string")
+                referenceReads.add(path.resolve(ref.path, tool.reference.path));
+            }
             const detail =
               typeof block.content === "string" ? block.content : JSON.stringify(block.content);
             if (
@@ -951,6 +974,16 @@ export class AgentRuntime {
                 redact(detail, this.env).slice(0, 3000),
                 preflight,
               );
+              const reference = repositoryReference && ["Read", "Glob", "Grep"].includes(tool?.operation) &&
+                accessScope.readOnlyReferences?.some(ref => {
+                  const relative = path.relative(ref.path, accessFailure.resolvedTarget);
+                  return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+                });
+              if (reference) {
+                referenceDenials.set(accessFailure.resolvedTarget, accessFailure);
+                onEvent?.({type:"output",text:"Selected repository is available through mcp__devquest_repository__ReadRepositoryFile; use repoId and relative file path instead of native Read/Glob/Grep.\n"});
+                continue;
+              }
               failure = `Runtime repository access denied at ${accessFailure.target}: ${accessFailure.detail}. ${accessFailure.category}: ${accessFailure.remediation}`;
               preflight = {
                 ...preflight,
@@ -1167,6 +1200,16 @@ export class AgentRuntime {
           failure = `Runtime resolved unexpected model ${actualModel}`;
       }
     }
+    for (const [target, denial] of referenceDenials) {
+      const recovered = referenceReads.has(target) ||
+        (["Glob", "Grep"].includes(denial.operation) && [...referenceReads].some(file => {
+          const relative = path.relative(target, file);
+          return relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+        }));
+      if (recovered) continue;
+      accessFailure = {...denial, category:"REFERENCE_TOOL_REQUIRED", remediation:"Read this selected repository file using mcp__devquest_repository__ReadRepositoryFile with repoId and relative path; native file tools are confined to the assigned worktree."};
+      failure ||= `Selected repository reference was not read through its permitted reader: ${target}. ${accessFailure.remediation}`;
+    }
     if (failure)
       throw Object.assign(new Error(failure), {
         accessFailure,
@@ -1207,6 +1250,16 @@ export class CodexRuntime extends AgentRuntime {
   }
 
   async start(options = {}) {
+    if (!options.readOnly && options.accessScope?.readOnlyReferences?.length) {
+      const capabilities=await this.detectCapabilities();
+      if (!capabilities.available || !this.help.includes("--ignore-user-config"))
+        throw new Error("Codex lacks isolated configuration support for read-only task references");
+      const refs=options.accessScope.readOnlyReferences;
+      const reader=await createRepositoryReader({readOnly:true,cwd:refs[0].path,repositories:refs},call=>options.onEvent?.({type:"repository-tool",call}));
+      try {return await super.start({...options,sessionId:undefined,mcpConfig:{devquestReadUrl:reader.url},
+        prompt:options.prompt+"\nSelected read-only repository references: "+JSON.stringify(refs)+"\nUse mcp__devquest_repository__ReadRepositoryFile with repoId and relative path to inspect required reference files. Writes remain inside your assigned task worktree; no parent-directory access."});}
+      finally {await reader.close();}
+    }
     if (!options.readOnly || !options.accessScope) return super.start(options);
     const capabilities = await this.detectCapabilities();
     if (!capabilities.available) throw new Error(capabilities.reason);
@@ -1307,7 +1360,6 @@ export class CodexRuntime extends AgentRuntime {
       );
     }
     if (mcpConfig?.devquestReadUrl) {
-      if (!readOnly) throw new Error("Scoped repository reader cannot grant Developer access");
       args.push(
         "--enable",
         "code_mode_host",
@@ -1377,6 +1429,18 @@ export class CodexRuntime extends AgentRuntime {
 }
 
 export class ClaudeCodeRuntime extends AgentRuntime {
+  async start(options = {}) {
+    const refs = !options.readOnly && options.accessScope?.readOnlyReferences;
+    if (!refs?.length) return super.start(options);
+    const reader = await createRepositoryReader({readOnly:true,cwd:refs[0].path,repositories:refs},call=>options.onEvent?.({type:"repository-tool",call}));
+    try {
+      return await super.start({...options,sessionId:undefined,repositoryReference:true,
+        mcpConfig:JSON.stringify({mcpServers:{devquest_repository:{type:"http",url:reader.url}}}),
+        mcpTools:["mcp__devquest_repository__ReadRepositoryFile"],
+        prompt:options.prompt + "\nSELECTED REPOSITORY REFERENCES (read-only): " + JSON.stringify(refs) +
+          "\nFor EVERY cross-repository read or search, use mcp__devquest_repository__ReadRepositoryFile with repoId and relative file path. For example, to search pin/service.go, read that file through the MCP reader and inspect its returned text. For assigned worktree Git history, use repoId assigned-worktree-history with path HEAD when that reference is present; never follow .git pointers using native file tools. Only this HEAD history is authorized, not Git configuration or other worktrees. For dependency/package discovery, use this same reader with path set to a known directory or dot to list immediate children, then read the needed file. NEVER use native Read, Glob or Grep on these reference roots: --restricted confines those tools to the assigned worktree. A native denial does not mean the reference grant is missing: retry that exact file through the MCP reader. These are read-only references; writes remain confined to your assigned task worktree. Do not request parent-directory access."});
+    } finally {await reader.close();}
+  }
   constructor(options = {}) {
     super({ name: "Claude Code", executable: "claude", ...options });
   }
@@ -1406,6 +1470,7 @@ export class ClaudeCodeRuntime extends AgentRuntime {
     nativeSkill,
     skillPluginDir,
     mcpGuard,
+    repositoryReference = false,
   }) {
     if (nativeSkill && !this.help.includes("--disable-slash-commands"))
       throw new Error(
@@ -1432,6 +1497,8 @@ export class ClaudeCodeRuntime extends AgentRuntime {
     if (readOnly && !this.help.includes("--permission-mode")) {
       throw new Error("Installed Claude Code CLI lacks permission-mode support");
     }
+    if (repositoryReference && (readOnly || !mcpConfig || mcpTools?.join() !== "mcp__devquest_repository__ReadRepositoryFile"))
+      throw new Error("Invalid read-only repository reference configuration");
     const args = ["--print", "--output-format", "stream-json", "--verbose"];
     if (nativeSkill) {
       if (!this.help.includes("--plugin-dir"))
@@ -1470,7 +1537,7 @@ export class ClaudeCodeRuntime extends AgentRuntime {
         "--disallowedTools",
         nativeSkill
           ? "Agent,Task,TeamCreate,TeamDelete,Bash,NotebookEdit,Edit,Write"
-          : "Agent,Task,TeamCreate,TeamDelete,Bash,NotebookEdit,mcp__*",
+          : repositoryReference ? "Agent,Task,TeamCreate,TeamDelete,Bash,NotebookEdit" : "Agent,Task,TeamCreate,TeamDelete,Bash,NotebookEdit,mcp__*",
       );
       settings.permissions = {
         deny: [
@@ -1494,7 +1561,7 @@ export class ClaudeCodeRuntime extends AgentRuntime {
       mcpConfig
         ? nativeSkill
           ? "Read,Skill"
-          : "Read"
+          : repositoryReference ? "Read,Glob,Grep,Edit,Write" : "Read"
         : readOnly
           ? "Read,Glob,Grep"
           : "Read,Glob,Grep,Edit,Write",
@@ -1504,7 +1571,7 @@ export class ClaudeCodeRuntime extends AgentRuntime {
       args.push(
         "--allowedTools",
         mcpConfig
-          ? ["Read", ...(nativeSkill ? [`Skill(${nativeSkill})`] : []), ...mcpTools].join(",")
+          ? [repositoryReference ? "Read,Glob,Grep,Edit,Write" : "Read", ...(nativeSkill ? [`Skill(${nativeSkill})`] : []), ...mcpTools].join(",")
           : "Read,Glob,Grep",
       );
     if (sessionId) args.push("--resume", sessionId);
@@ -1629,7 +1696,7 @@ export class SkillRunner {
           : null;
       const reservationDirectory = path.join(dir, "create-reservations");
       if (publicationEntries) await mkdir(reservationDirectory, { mode: 0o700 });
-      const { skillPaths, agentProfileContext, ...data } = input;
+      const { skillPaths, agentProfileContext, onEvent, onDispatch, signal, ...data } = input;
       let inputDirectory;
       if (kind === "appendix") {
         inputDirectory = path.join(dir, "inputs");
@@ -1688,10 +1755,10 @@ export class SkillRunner {
         mcpTools: methods.map((method) => `mcp__${mcpServer}__${method}`),
         prompt:
           kind !== "appendix"
-            ? `Invoke the native Skill tool with skill="${nativeSkill}". The user's explicitly selected target project and URL in quest.jiraContext supersede the skill's FFE-specific project scope for this request. Keep the installed skill's field, category, weight, Epic, assignee and sample/batch checks. Never switch projects to satisfy a cached example. Validate against live metadata, never cached MOB mappings when they do not match this target. ${kind === "verify" ? "READ-ONLY PREPARATION: no publication is authorized. Discover the authenticated tenant using getAccessibleAtlassianResources, confirm the selected project via getVisibleJiraProjects with searchString equal to the selected project, expandIssueTypes=false, fetch Task issue types and complete create-field metadata using projectIdOrKey, issueTypeId and requiredFieldsOnly=false, and verify the supplied Epic via getJiraIssue. Fetch all metadata pages. Return a short preparation result only; no Jira issue creation or modifications. If the skill refuses the selected project, return a specific waitingInput conflict rather than bypassing it." : "Publish only this explicitly authorized sample/batch (at most maxIssues) using verifiedCapabilities from the preceding read-only preparation. Recheck permissions and stop on stale or mismatched metadata. No approval for subsequent batches."} The exact approved Markdown is appendixContent at appendixPath; read it verbatim, do not regenerate, reweight, paraphrase, or publish work absent from it. It is the sole authoritative task document. Preserve stable appendix task IDs and return them as appendixTaskId alongside execution taskId in every mapping. Use appendixIdempotencyPrefix + stable appendixTaskId as the unique marker for each issue, including across document revisions. appendixTaskMapping is authoritative: each appendixTaskId maps to an executionTaskIds array, including many-to-many associations. Never infer execution IDs from numeric prefixes. For each result, return a taskId from the supplied batch that belongs to that array; DevQuest propagates all explicit associations. publicationManifest.entries contains the exact intendedFields and persistent marker for each card. existingIssues contains verified appendixTaskId, executionTaskIds, key and marker records; an empty array is valid only after the supplied complete reconciliation proof. Respect existingIssues for all execution tasks. Search Jira using this stable idempotency marker before ANY create, and retain existing issue mappings. If a prior create is ambiguous, stop for reconciliation instead of blindly creating a duplicate. Include that marker and appendix task ID in every created description. No source writes, Bash, commits, pushes or other skills. Resolve tools using the configured ${mcpServer} connection; never read another developer's cached memory. ${kind === "verify" ? 'Return JSON {"prepared":true}' : 'Return internal transport JSON {"results":[{"taskId":"execution UUID","appendixTaskId":"T1.1","key":"verified issue key","url":"issue URL","complete":false}]}'}. If any required input is missing return {"waitingInput":true,"question":"specific problem","results":[]} without creating issues. Application input:\n${JSON.stringify(data)}`
+            ? `Invoke the native Skill tool with skill="${nativeSkill}". The user's explicitly selected target project and URL in quest.jiraContext supersede the skill's FFE-specific project scope for this request. Keep the installed skill's field, category, weight, Epic, assignee and sample/batch checks. Never switch projects to satisfy a cached example. Validate against live metadata, never cached MOB mappings when they do not match this target. ${kind === "verify" ? "READ-ONLY PREPARATION: no publication is authorized. Discover the authenticated tenant using getAccessibleAtlassianResources, confirm the selected project via getVisibleJiraProjects with searchString equal to the selected project, expandIssueTypes=false, fetch Task issue types and complete create-field metadata using projectIdOrKey, issueTypeId and requiredFieldsOnly=false, and verify the supplied Epic via getJiraIssue. Fetch all metadata pages. Return a short preparation result only; no Jira issue creation or modifications. If the skill refuses the selected project, return a specific waitingInput conflict rather than bypassing it." : "When publicationPhase is remaining, the user explicitly answers the skill's next-batch question: publish all the Jira tickets left in this approved document. Publish all pending publicationManifest entries within maxIssues, preserving existing mappings; do not stop at an arbitrary five-ticket batch. When publicationPhase is sample, create at most one issue and stop. Publish only this explicitly authorized scope (at most maxIssues) using verifiedCapabilities from the preceding read-only preparation. Recheck permissions and stop on stale or mismatched metadata. No approval for subsequent batches."} The exact approved Markdown is appendixContent at appendixPath; read it verbatim, do not regenerate, reweight, paraphrase, or publish work absent from it. It is the sole authoritative task document. Preserve stable appendix task IDs and return them as appendixTaskId alongside execution taskId in every mapping. Use appendixIdempotencyPrefix + stable appendixTaskId as the unique marker for each issue, including across document revisions. appendixTaskMapping is authoritative: each appendixTaskId maps to an executionTaskIds array, including many-to-many associations. Never infer execution IDs from numeric prefixes. For each result, return a taskId from the supplied batch that belongs to that array; DevQuest propagates all explicit associations. publicationManifest.entries contains the exact intendedFields and persistent marker for each card. existingIssues contains verified appendixTaskId, executionTaskIds, key and marker records; an empty array is valid only after the supplied complete reconciliation proof. Respect existingIssues for all execution tasks. Search Jira using this stable idempotency marker before ANY create, and retain existing issue mappings. If a prior create is ambiguous, stop for reconciliation instead of blindly creating a duplicate. Include that marker and appendix task ID in every created description. No source writes, Bash, commits, pushes or other skills. Resolve tools using the configured ${mcpServer} connection; never read another developer's cached memory. ${kind === "verify" ? 'Return JSON {"prepared":true}' : 'Return internal transport JSON {"results":[{"taskId":"execution UUID","appendixTaskId":"T1.1","key":"verified issue key","url":"issue URL","complete":false}]}'}. If any required input is missing return {"waitingInput":true,"question":"specific problem","results":[]} without creating issues. Application input:\n${JSON.stringify(data)}`
             : `You are the Jira Appendix Agent. Invoke the native Skill tool with skill="${nativeSkill}" before generating. This is the unchanged installed user skill, explicitly loaded in the devquest-jira session namespace; do not invoke its unqualified name. Do not substitute your own generator. If it is unavailable return a specific missing-input question. Do not invoke other skills, agents or workflows.\nUse the approved implementation plan as the sole source of work; TRD is rationale only. Preserve all task dependencies, execution IDs and acceptance criteria. Use the saved Jira parameters; assignee and weight reference are optional. When listing projects use searchString equal to the selected project and expandIssueTypes=false. Resolve Jira metadata using only the configured ${mcpServer} read-only tools. Before weighting, use the attached backend-verified read-only Jira preflight as current live metadata: it fetched the complete selected project/Task context immediately before this turn, including optional fields and exact enabled option IDs/labels for customfield_11543. Do not refetch a large response just to repeat that check, and never read Claude cache files under ~/.claude; the backend owns large tool-output imports. If a refresh is necessary, call getJiraIssueTypeMetaWithFields with the saved project key, requiredFieldsOnly=false and bounded pagination. If the field/options are absent, return waitingInput with that specific configuration problem; never invent categories or silently use another board/PDF. For labels without MOB-V/L/M/H tier prefixes, require the matching saved weight reference and ask if it is missing. The skill's live appendix categories, exact weights, stable task IDs and seven-section Markdown structure remain authoritative. Prior appendix content, if supplied, is for stable task ID comparison only; new work must still come solely from the current approved plan. Use exactly the installed skill document structure; do not add mandatory task-card fields absent from its contract.\nNo file writes, implementation, branches, Git commands, commits, pushes, PRs or issue creation/modification. Application backend owns file persistence. Ignore the skill's publication/handoff instructions; stop after returning draft for human review. Return the complete Markdown document directly, with no JSON requirement and no commentary. An internal JSON envelope with a content string is accepted, but the document itself is Markdown. For missing input only, return {"waitingInput":true,"question":"specific missing input"}. Never return only a success message.\nApplication input:\n${JSON.stringify(data)}`,
       };
-      if (agentProfileContext) {
+      if (agentProfileContext && kind !== "verify") {
         prepared.prompt =
           agentProfileContext.prompt + "\nNATIVE SKILL CONTRACT\n" + prepared.prompt;
         prepared.profileSnapshot = agentProfileContext.snapshot;
@@ -1805,7 +1872,7 @@ export class SkillRunner {
         prepared,
         context: input.quest.jiraContext,
         timeoutMs: 120000,
-        signal: controller.signal,
+        signal: input.signal ? AbortSignal.any([controller.signal, input.signal]) : controller.signal,
         afterMetadata: ({ result, evidence, inventory }) => {
           const entries = (method) => evidence.filter((e) => e.method === method);
           const base = { cloudId: result.cloudId };
@@ -1968,14 +2035,16 @@ export class SkillRunner {
       this.controller = new AbortController();
       try {
         if (this.closed) throw abortError();
+        input.onDispatch?.();
         const result = await this.runtime.start({
           ...prepared,
           cwd: path.dirname(input.appendixPath),
           readOnly: true,
-          signal: this.controller.signal,
+          signal: input.signal ? AbortSignal.any([this.controller.signal, input.signal]) : this.controller.signal,
           executionPolicy: { nestedSpawning: false },
-          timeoutMs: 120000,
+          timeoutMs: Math.min(1800000, 120000 + 30000 * input.maxIssues),
           onEvent: (event) => {
+            input.onEvent?.(event);
             if (event.type === "native-skill") invoked = true;
             if (event.type === "jira-read" && event.method === "getJiraIssue" && !event.error)
               confirmations.push(event);
@@ -1985,33 +2054,32 @@ export class SkillRunner {
           throw new Error(
             "Native upload-task-to-jira invocation was not verified; reconcile Jira before retrying",
           );
-        const parsed = JSON.parse(
-          result.text
-            .trim()
-            .replace(/^```json\s*/, "")
-            .replace(/\s*```$/, ""),
-        );
+        const parsed = parsePublisherResponse(result.text);
+        if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.results))
+          throw new Error("Publisher response omitted verified result mappings; reconcile Jira before retrying");
         if (parsed.waitingInput) throw new Error(parsed.question || "Upload skill needs input");
-        for (const mapping of parsed.results || []) {
+        const matchesReadBack = (mapping) => {
           const marker = input.publicationManifest.entries.find(
             (e) => e.appendixTaskId === mapping.appendixTaskId,
           )?.marker;
-          const confirmed = confirmations
-            .filter((e) => e.input?.issueIdOrKey === mapping.key)
-            .flatMap((e) => jiraObjects(e.content))
-            .some(
-              (issue) =>
-                issue.key === mapping.key &&
-                issue.fields?.project?.key === input.quest.jiraContext.project &&
-                marker &&
-                new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![\\w.-])").test(
-                  JSON.stringify(issue.fields?.description || ""),
-                ),
-            );
-          if (!confirmed)
-            throw new Error(
-              "Publisher returned an unconfirmed issue key/marker; reconcile Jira before retrying",
-            );
+          return confirmations.flatMap((event) => jiraObjects(event.content)).some((issue) =>
+            issue.key === mapping.key && issue.fields?.project?.key === input.quest.jiraContext.project &&
+            marker && new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![\\w.-])")
+              .test(JSON.stringify(issue.fields?.description || "")));
+        };
+        if (!parsed.results.every(matchesReadBack)) {
+          input.onEvent?.({type: "publication-verification", phase: "VERIFYING", source: "READ_ONLY_RECONCILIATION",
+            readBackCount: confirmations.length});
+          // Native read-back events are optional; verify missing evidence through the existing read-only MCP path.
+          const proof = await this.preflightPublication(input);
+          const reconciled = reconcileIssueSearch(input.publicationManifest, proof.searchPages);
+          if (proof.cloudId !== input.publicationManifest.cloudId || proof.projectId !== input.publicationManifest.projectId ||
+              proof.siteUrl !== input.publicationManifest.siteUrl ||
+              !parsed.results.every(mapping => reconciled.entries.some(entry =>
+                entry.appendixTaskId === mapping.appendixTaskId && entry.issueKey === mapping.key)))
+            throw new Error("Publisher returned an unconfirmed issue key/marker after read-only reconciliation; reconcile Jira before retrying");
+          input.onEvent?.({type: "publication-verification", phase: "VERIFIED", source: "READ_ONLY_RECONCILIATION",
+            matchedIssueCount: parsed.results.length, checkedAt: reconciled.checkedAt, readBackCount: confirmations.length});
         }
         return parsed;
       } finally {
@@ -2159,6 +2227,9 @@ export class SkillRunner {
     appendixIdempotencyPrefix,
     publicationAuthorization,
     agentProfileContext,
+    onEvent,
+    onDispatch,
+    signal,
   }) {
     const normalizedTasks = tasks.map((task) => {
       if (!task.id) throw new Error("Every Jira task requires a stable task id");
@@ -2169,6 +2240,8 @@ export class SkillRunner {
       };
     });
     if (!this.bridge?.executable) {
+      let dispatched = false;
+      try {
       if (
         !publicationManifest?.entries?.length ||
         publicationManifest.state !== "READY" ||
@@ -2192,7 +2265,9 @@ export class SkillRunner {
         publicationManifest.cloudId !== verifiedCapabilities.cloudId ||
         publicationManifest.projectId !== verifiedCapabilities.projectId ||
         publicationManifest.search?.complete !== true ||
-        publicationManifest.search?.visibilityVerified !== true ||
+        !(publicationManifest.search?.visibilityVerified === true ||
+          (publicationManifest.visibilityScope === "account-visible" &&
+            acceptsAccountVisibleSearch(quest, { id: appendixArtifactId, hash: appendixHash }))) ||
         appendixIdempotencyPrefix !== `devquest:${quest.id}:appendix:` ||
         entries.length !== validateAppendix(appendixContent).length ||
         new Set(entries.map((e) => e.appendixTaskId)).size !== entries.length ||
@@ -2212,6 +2287,8 @@ export class SkillRunner {
           "Publisher manifest, explicit mappings or reconciled visibility proof do not match the approved input; no paid publisher started",
         );
       const parsed = await this.#direct("upload", {
+        onEvent, signal,
+        onDispatch: () => { dispatched = true; onDispatch?.(); },
         agentProfileContext,
         quest,
         tasks: normalizedTasks,
@@ -2242,7 +2319,7 @@ export class SkillRunner {
       if (
         !Number.isInteger(maxIssues) ||
         maxIssues < 1 ||
-        maxIssues > 5 ||
+        maxIssues > entries.filter(e => !e.issueKey).length ||
         !parsed.results.length ||
         parsed.results.length > maxIssues ||
         parsed.results.some(
@@ -2258,7 +2335,12 @@ export class SkillRunner {
           "Upload returned unverified or out-of-scope Jira mappings; reconcile the attempted publication before retrying",
         );
       return parsed.results.map((item) => ({ ...item, complete: item.complete === true }));
+      } catch (error) {
+        if (!dispatched) error.publisherNotStarted = true;
+        throw error;
+      }
     }
+    onDispatch?.();
     const result = await this.runner(this.bridge.executable, this.bridge.args ?? [], {
       input: JSON.stringify({
         operation: "publish",
@@ -2614,7 +2696,7 @@ export class GitHubProvider extends SourceControlProvider {
       throw new Error("Reviewer assignment was not confirmed; retry the review request");
   }
 
-  async #find(cwd, branch, baseBranch) {
+  async find(cwd, branch, baseBranch) {
     const result = await this.runner(
       "gh",
       [
@@ -2649,8 +2731,14 @@ export class GitHubProvider extends SourceControlProvider {
       : null;
   }
 
+  async createRemote({cwd,branch,baseBranch,title,body}) {
+    return this.runner("gh",["pr","create","--base",baseBranch,"--head",branch,"--title",title,"--body",body],
+      {cwd,timeoutMs:60000,maxOutput:20000});
+  }
+
   async create({
     repoPath,
+    remote,
     path: worktreePath,
     branch,
     baseBranch = "development",
@@ -2660,6 +2748,8 @@ export class GitHubProvider extends SourceControlProvider {
     protectedBranches = [],
     expectedHead,
   }) {
+    if (this.host !== "bitbucket.org" && /(?:@|\/\/)bitbucket\.org[:/]/i.test(remote || ""))
+      throw new Error("PR creation is blocked: this repository is hosted on Bitbucket, but DevQuest currently uses the GitHub CLI. Configure a Bitbucket PR integration or create the PR manually; GitHub authentication will not fix this provider mismatch.");
     if (
       !/^(?:devquest|task|quest|epic)\/[A-Za-z0-9._/-]+$/.test(branch || "") ||
       ["main", "master", ...protectedBranches].some((pattern) =>
@@ -2678,7 +2768,7 @@ export class GitHubProvider extends SourceControlProvider {
     )
       throw new Error("Push requires verified DevQuest branch ownership");
     await this.git?.reconcile({ repoPath, path: worktreePath, branch });
-    const existing = await this.#find(worktreePath, branch, baseBranch);
+    const existing = await this.find(worktreePath, branch, baseBranch);
     const head = await checked(this.runner, "git", ["rev-parse", "HEAD"], {
       cwd: worktreePath,
     });
@@ -2705,20 +2795,101 @@ export class GitHubProvider extends SourceControlProvider {
         maxOutput: 20_000,
       },
     );
-    if (existing) return verified(await this.#find(worktreePath, branch, baseBranch));
+    if (existing) return verified(await this.find(worktreePath, branch, baseBranch));
     let creation;
     try {
-      creation = await this.runner(
-        "gh",
-        ["pr", "create", "--base", baseBranch, "--head", branch, "--title", title, "--body", body],
-        { cwd: worktreePath, timeoutMs: 60_000, maxOutput: 20_000 },
-      );
+      creation = await this.createRemote({cwd:worktreePath,branch,baseBranch,title,body});
     } catch {
       creation = { code: 1, stdout: "", stderr: "gh invocation failed" };
     }
-    const recovered = await this.#find(worktreePath, branch, baseBranch);
+    const recovered = await this.find(worktreePath, branch, baseBranch);
     if (recovered) return verified(recovered);
+    if (this.host === "bitbucket.org") throw new Error("Bitbucket PR creation was not confirmed; reconcile open PRs before retrying. Check MCP token scopes and repository access.");
     throw commandError("gh", ["pr", "create"], creation);
+  }
+}
+
+export function bitbucketRepository(remote) {
+  const match=String(remote || '').match(/^(?:git@bitbucket\.org:|https:\/\/bitbucket\.org\/)([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i);
+  if(!match) throw Error('Use a registered Bitbucket Cloud SSH or HTTPS repository remote');
+  return {workspace:match[1],repository:match[2]};
+}
+
+export class BitbucketProvider extends GitHubProvider {
+  constructor({connect=connectBitbucketMcp,publicationDirectory=path.join(homedir(),'.devquest','bitbucket-publications'),mcpConfigPath,mcpServer,...options}={}) {
+    super(options);this.host='bitbucket.org';this.connect=connect;this.publicationDirectory=publicationDirectory;
+    this.connectionOptions={configPath:mcpConfigPath,server:mcpServer};
+  }
+  async create(input) {
+    const identity=bitbucketRepository(input.remote);
+    const scoped=Object.create(this);
+    scoped.root=`/repositories/${encodeURIComponent(identity.workspace)}/${encodeURIComponent(identity.repository)}`;
+    scoped.fullName=`${identity.workspace}/${identity.repository}`;
+    const key=createHash('sha256').update(JSON.stringify([scoped.fullName,input.branch,input.baseBranch || 'development'])).digest('hex');
+    scoped.manifest=path.join(this.publicationDirectory,key+'.json');
+    scoped.api=await this.connect({...this.connectionOptions,...identity,write:true,reviewers:input.reviewers || []});
+    try {
+      scoped.reviewers=[];
+      for(const name of input.reviewers || []) {
+        const user=await scoped.api.request('GET',`/users/${encodeURIComponent(name)}`);
+        if(!user.uuid)throw Error('Bitbucket reviewer identity could not be verified');
+        scoped.reviewers.push({uuid:user.uuid});
+      }
+      const pr=await super.create.call(scoped,input);
+      await mkdir(this.publicationDirectory,{recursive:true,mode:0o700});
+      await writeFile(scoped.manifest,JSON.stringify({state:'CONFIRMED',...pr,head:input.expectedHead}),{mode:0o600});
+      return pr;
+    }finally{await scoped.api.close();}
+  }
+  async find(_cwd,branch,baseBranch) {
+    const matches=[];
+    for(let page=1;page<=100;page++) {
+      const result=await this.api.request('GET',this.root+'/pullrequests',{queryParams:{
+        q:`state="OPEN" AND source.branch.name=${JSON.stringify(branch)} AND destination.branch.name=${JSON.stringify(baseBranch)}`,
+        pagelen:'50',page:String(page),fields:'values.id,values.links.html.href,values.source.branch.name,values.source.commit.hash,values.source.repository.full_name,values.destination.branch.name,next',
+      }});
+      if(!Array.isArray(result.values))throw Error('Bitbucket PR search returned incomplete metadata');
+      for(const pr of result.values) {
+        if(pr.source?.branch?.name!==branch || pr.destination?.branch?.name!==baseBranch ||
+          pr.source?.repository?.full_name?.toLowerCase()!==this.fullName.toLowerCase())throw Error('Bitbucket PR search scope mismatch');
+        matches.push(pr);
+      }
+      if(!result.next)break;
+      if(page===100)throw Error('Bitbucket PR pagination incomplete; no creation permitted');
+    }
+    if(matches.length>1)throw Error('Multiple matching Bitbucket PRs; reconcile duplicates before publishing');
+    const pr=matches[0];if(!pr)return null;
+    const expected=`https://bitbucket.org/${this.fullName}/pull-requests/${pr.id}`;
+    if(!Number.isInteger(pr.id) || pr.links?.html?.href?.replace(/\/$/,'')!==expected)throw Error('Bitbucket returned an unverified PR URL');
+    let head=pr.source.commit?.hash;
+    if(typeof head!=='string' || !/^[0-9a-f]{12,40}$/.test(head))throw Error('Bitbucket returned an invalid PR commit');
+    if(head.length!==40) {
+      const commit=await this.api.request('GET',this.root+'/commit/'+head);
+      if(typeof commit.hash!=='string' || !/^[0-9a-f]{40}$/.test(commit.hash) || !commit.hash.startsWith(head))
+        throw Error('Bitbucket PR commit could not be resolved to a verified full hash');
+      head=commit.hash;
+    }
+    return {number:pr.id,url:expected,head};
+  }
+  async createRemote({branch,baseBranch,title,body}) {
+    await mkdir(this.publicationDirectory,{recursive:true,mode:0o700});
+    try {await writeFile(this.manifest,JSON.stringify({state:'UNCERTAIN',createdAt:new Date().toISOString()}),{flag:'wx',mode:0o600});}
+    catch {throw Error('Previous Bitbucket creation is uncertain or already recorded; reconcile before another create');}
+    await this.api.request('POST',this.root+'/pullrequests',{body:{title,description:body,
+      source:{branch:{name:branch}},destination:{branch:{name:baseBranch}},close_source_branch:false,reviewers:this.reviewers}});
+    return {code:0,stdout:'',stderr:''};
+  }
+  async requestReview({path:cwd,remote,number,reviewers}) {
+    remote ||= await checked(this.runner,'git',['config','--get','remote.origin.url'],{cwd});
+    const identity=bitbucketRepository(remote);
+    const api=await this.connect({...this.connectionOptions,...identity,reviewers,write:false});
+    try {
+      const pr=await api.request('GET',`/repositories/${identity.workspace}/${identity.repository}/pullrequests/${number}`);
+      for(const name of reviewers) {
+        const user=await api.request('GET',`/users/${encodeURIComponent(name)}`);
+        if(!user.uuid || !pr.reviewers?.some(r=>r.uuid===user.uuid))throw Error('Bitbucket reviewer assignment is not confirmed; add requested reviewers in Bitbucket before retrying');
+      }
+    }finally{await api.close();}
   }
 }
 
@@ -2867,10 +3038,14 @@ export async function createAdapters(config = {}) {
       fetch: config.fetch,
       ...(config.confluence ?? {}),
     }),
-    sourceControl: new GitHubProvider({
-      runner,
-      git,
-      ...(config.sourceControl ?? {}),
-    }),
+    sourceControl: {
+      async provider(input) {
+        const remote=input.remote || await checked(runner,"git",["config","--get","remote.origin.url"],{cwd:input.path});
+        const Provider=config.sourceControl?.provider === "bitbucket-mcp" || /(?:@|\/\/)bitbucket\.org[:/]/i.test(remote) ? BitbucketProvider : GitHubProvider;
+        return {provider:new Provider({runner,git,...config.sourceControl}),remote};
+      },
+      async create(input) {const {provider,remote}=await this.provider(input);return provider.create({...input,remote});},
+      async requestReview(input) {const {provider,remote}=await this.provider(input);return provider.requestReview({...input,remote});},
+    },
   };
 }

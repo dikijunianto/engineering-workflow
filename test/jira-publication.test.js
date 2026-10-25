@@ -24,10 +24,12 @@ async function setup(t) {
     assert.equal(input.appendixArtifactId, artifact.id);
     assert.equal(input.appendixHash, artifact.hash);
     assert.equal(input.appendixContent, markdown);
+    assert.equal(input.publicationPhase, writes === 1 ? "sample" : "remaining");
+    assert.equal(input.maxIssues, input.tasks.length);
     return input.tasks.map(task => ({ taskId: task.id, key: `FFE-${writes * 100 + input.tasks.indexOf(task)}`, complete: true }));
   };
   const preview = (changes = {}) => f.engine.action("PREVIEW_JIRA_PUBLICATION", { questId: q.id, appendixArtifactId: artifact.id, ...changes });
-  const publish = () => f.engine.action("PUBLISH_JIRA", { questId: q.id, appendixArtifactId: artifact.id, appendixHash: artifact.hash });
+  const publish = (changes = {}) => f.engine.action("PUBLISH_JIRA", { questId: q.id, appendixArtifactId: artifact.id, appendixHash: artifact.hash, ...changes });
   return { ...f, old, completed, plan, trd, artifact, preview, publish, writes: () => writes };
 }
 
@@ -45,13 +47,22 @@ test("completed generation plus obsolete waiting/failed/interrupted attempts rea
   assert.equal(f.engine.snapshot().artifacts.find(a => a.id === f.artifact.id).publicationReady, true);
   const op = await f.publish(); await f.engine.v11.pending.get(op.id);
   assert.equal(f.writes(), 1);
-  assert.equal((await f.preview()).maxIssues, 5);
+  const originalTask = f.engine.tasks(f.quest.id).at(-1);
+  for (let i=0;i<6;i++) f.store.put("tasks", {...originalTask,id:`extra-${i}`,jira:undefined,state:"PLANNED"});
+  const remaining = f.engine.tasks(f.quest.id).filter(t => !t.jira || t.jira.complete === false).length;
+  assert.ok(remaining > 5);
+  assert.equal((await f.preview()).maxIssues, remaining);
+  const blocked = await f.publish({confirmedMaxIssues:1});
+  await f.engine.v11.pending.get(blocked.id);
+  assert.match(f.store.get("operations",blocked.id).error,/exceeds the confirmed scope/);
+  assert.equal(f.writes(),1);
   const next = await f.publish(); await f.engine.v11.pending.get(next.id);
   assert.equal(f.writes(), 2);
   await assert.rejects(f.preview(), /already published/);
   const again = await f.publish(); await f.engine.v11.pending.get(again.id);
   assert.equal(f.writes(), 2);
-  assert.equal(JSON.stringify(f.store.all("runs").filter(r => !["failed", "interrupted"].includes(r.id))), history);
+  assert.equal(JSON.stringify(f.store.all("runs").filter(r => r.purpose !== "jira_publish" && !["failed", "interrupted"].includes(r.id))), history);
+  assert.equal(f.store.all("runs").filter(r=>r.purpose==="jira_publish"&&r.state==="COMPLETED").length,2);
 });
 
 test("publication rejects genuine generation, relevant waiting, live terminal processes and uncertain or active publication", async t => {

@@ -91,6 +91,7 @@ export class QuestRoom {
     if (failed.length)
       return failed.map((t) => ({
         title: `Task needs attention: ${t.title}`,
+        taskId: t.id,
         detail: t.error || t.state,
         href: `#quest/${quest.id}/tasks`,
       }));
