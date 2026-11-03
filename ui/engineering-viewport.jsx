@@ -71,7 +71,7 @@ export function EngineeringViewport({ stageIndex = 0, onSelectStage = () => {} }
         <div role="status" className="dq-scene-fallback">
           <h3>Engineering workflow</h3>
           <p>{error}</p>
-          <ol>
+          <ul>
             {[
               "Intake & repositories",
               "Repository analysis",
@@ -84,7 +84,7 @@ export function EngineeringViewport({ stageIndex = 0, onSelectStage = () => {} }
                 <button onClick={() => onSelectStage(i + 1)}>{name}</button>
               </li>
             ))}
-          </ol>
+          </ul>
         </div>
       ) : (
         <>
@@ -147,10 +147,10 @@ export function EngineeringViewport({ stageIndex = 0, onSelectStage = () => {} }
           <div ref={labels} className="dq-world-labels" />
         </>
       )}
-      <p className="dq-world-phase" aria-live="polite">
+      <p hidden={!!error} className="dq-world-phase" aria-live="polite">
         {phase}
       </p>
-      <div className="dq-world-controls" aria-label="Scene controls">
+      <div hidden={!!error} className="dq-world-controls" aria-label="Scene controls">
         <button onClick={() => control("zoom", -0.1)} disabled={!!error} aria-label="Zoom out">
           −
         </button>
@@ -164,7 +164,7 @@ export function EngineeringViewport({ stageIndex = 0, onSelectStage = () => {} }
           {reduced ? "Show handoff" : "Replay handoff"}
         </button>
       </div>
-      <p className="dq-world-help">
+      <p hidden={!!error} className="dq-world-help">
         Drag to orbit · Focus scene for keyboard controls
         {reduced ? " · Reduced motion enabled" : ""}
       </p>

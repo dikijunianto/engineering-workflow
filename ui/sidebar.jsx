@@ -7,10 +7,8 @@ import {
   Sparkles,
   SquareCheck,
   Settings,
-  Box,
 } from "lucide-react";
 import { version } from "../package.json";
-import { openOnboarding3D } from "./onboarding-3d";
 
 const groups = [
   {
@@ -50,7 +48,7 @@ export function Sidebar({
           aria-label={group.title}
           className={group.title === "SYSTEM" ? "dq-system" : ""}
         >
-          <h2 className="mb-2 px-3 text-[10px] font-medium tracking-widest text-zinc-500">
+          <h2 hidden={group.title === "SYSTEM"} className="mb-2 px-3 text-[10px] font-medium tracking-widest text-zinc-500">
             {group.title}
           </h2>
           <div className="space-y-1">
@@ -85,37 +83,13 @@ export function Sidebar({
                 )}
               </a>
             ))}
-            {group.title === "SYSTEM" && (
-              <button
-                type="button"
-                onClick={() => openOnboarding3D({ state, actions })}
-                className="group flex min-h-9 w-full items-center gap-2.5 rounded-r-lg border-l-2 border-transparent px-3 py-2 text-left text-[13px] font-medium text-emerald-400 transition-colors hover:bg-zinc-800/40 hover:text-emerald-300"
-              >
-                <Box className="size-4 text-emerald-400" aria-hidden="true" />
-                <span>3D Workflow Guide</span>
-              </button>
-            )}
           </div>
           {group.title === "SYSTEM" && (
-            <div
-              className="mt-4 flex items-center gap-1.5 border-t border-zinc-800/60 px-3 pt-4 text-[10px] text-zinc-500"
-              role="status"
-              title="Local DevQuest connection status. Provider authentication and model availability are checked separately."
-            >
-              <span
-                className={`size-1.5 shrink-0 rounded-full ${ready ? "bg-emerald-400" : "bg-amber-400"}`}
-                aria-hidden="true"
-              />
-              <span>
-                {restartRequired
-                  ? "Restart required"
-                  : ready
-                    ? "Local engine ready"
-                    : "Engine reconnecting"}
-              </span>
-              <span aria-hidden="true">|</span>
-              <span>v{version}</span>
-            </div>
+            <span className="dq-engine-indicator" role="status"
+              aria-label={`${restartRequired ? "Restart required" : ready ? "Local engine ready" : "Engine reconnecting"} · v${version}`}
+              title={`${restartRequired ? "Restart required" : ready ? "Local engine ready" : "Engine reconnecting"} · v${version}. Connection status only; provider readiness is checked separately.`}>
+              <span className={`block size-1.5 rounded-full ${ready ? "bg-emerald-400" : "bg-amber-400"}`} aria-hidden="true" />
+            </span>
           )}
         </section>
       ))}

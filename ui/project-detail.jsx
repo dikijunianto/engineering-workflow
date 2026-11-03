@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { Marked } from "marked";
+import { roomSummary, roomGroups, currentAttentionRuns } from "./model";
 import {
   ArrowLeft,
   Settings,
@@ -59,6 +60,9 @@ const safeUrl = (value) => {
 
 const markdownParser = new Marked({
   renderer: {
+    heading({ depth, tokens, sectionId }) {
+      return `<h${depth}${sectionId ? ` id="${sectionId}" tabindex="-1"` : ""}>${this.parser.parseInline(tokens)}</h${depth}>`;
+    },
     html({ text }) {
       return escHtml(text);
     },
@@ -75,9 +79,25 @@ const markdownParser = new Marked({
   },
 });
 
-function renderMarkdown(content = "") {
-  const cleaned = String(content || "").split("<!-- devquest-tasks")[0];
-  return markdownParser.parse(cleaned);
+export function readableDocument(content = "") {
+  const tokens = markdownParser.lexer(String(content || "").split("<!-- devquest-tasks")[0]);
+  const headings = [];
+  for (const token of tokens) {
+    if (token.type === "heading") {
+      token.sectionId = `document-section-${headings.length}`;
+      headings.push({ id: token.sectionId, title: token.text.replace(/[*_`]/g, ""), depth: token.depth });
+    }
+  }
+  return { html: markdownParser.parser(tokens), headings };
+}
+
+export function briefExcerpt(content = "") {
+  const tokens = markdownParser.lexer(String(content || "").split("<!-- devquest-tasks")[0]);
+  const goal = tokens.findIndex(t => t.type === "heading" && /\b(goal|objective|summary|problem)\b/i.test(t.text));
+  const candidates = goal >= 0 ? tokens.slice(goal + 1) : tokens;
+  const paragraph = candidates.find(t => t.type === "paragraph" && !/^(Quest|Stage|Role|Date|Repositories|Registered base|Inputs):/i.test(t.text));
+  const next = candidates.slice(candidates.indexOf(paragraph) + 1).find(t => t.type !== "space");
+  return paragraph ? markdownParser.parser(next?.type === "list" ? [paragraph, next] : [paragraph]) : "";
 }
 
 const ROLE_DEFS = [
@@ -141,6 +161,7 @@ export function getStageLabel(state, quest) {
     ["RUNNING", "WAITING_INPUT"].includes(run.state),
   );
   if (active && STAGE_NAMES[active.purpose]) return STAGE_NAMES[active.purpose];
+  if (quest.state === "PRS_CREATED") return "Pull request handoff";
   if (implementationComplete(state,quest)) return "Independent review";
   return (
     {
@@ -537,6 +558,7 @@ function OverviewTab({ state, quest, actions }) {
     getArtifact(state, id, "tech_goal") ||
     getArtifact(state, id, "prd");
 
+  const brief = briefExcerpt(sourceDoc?.content);
   const linkedRepos = (quest.repositoryIds || []).map((repoId) => {
     const repo = (state.repositories || []).find((r) => r.id === repoId);
     const work = works.find((w) => w.repoId === repoId);
@@ -588,7 +610,7 @@ function OverviewTab({ state, quest, actions }) {
               <div className="space-y-1">
                 <h3 className="text-sm font-medium text-zinc-100">
                   {quest.state === "PRS_CREATED"
-                    ? "All pull requests and configured handoffs are complete"
+                    ? "Pull requests created — awaiting external review and merge"
                     : quest.state === "BRAINSTORM_COMPLETED"
                       ? "Technical specification saved — analyze repository impact next"
                       : active
@@ -599,7 +621,7 @@ function OverviewTab({ state, quest, actions }) {
                 </h3>
                 <p className="text-xs leading-relaxed text-zinc-400">
                   {quest.state === "PRS_CREATED"
-                    ? "Inspect pull request links and QA verification records in the Work tab."
+                    ? "DevQuest has completed its handoff. External review and merge status are not verified; follow the PR links in Work."
                     : active
                       ? "Open the Agent Room to inspect live streaming output or answer pending agent questions."
                       : "Trigger the immediate workflow action below or review saved design artifacts before proceeding."}
@@ -674,7 +696,7 @@ function OverviewTab({ state, quest, actions }) {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <FileText className="size-4 text-zinc-400" />
-                <CardTitle className="text-sm font-semibold text-zinc-100">Project Brief</CardTitle>
+                <CardTitle className="text-sm font-semibold text-zinc-100">Project scope</CardTitle>
                 {sourceDoc && (
                   <Badge variant="outline" className="border-zinc-700 text-[10px] text-zinc-400">
                     {sourceDoc.kind.toUpperCase()} · r{sourceDoc.revision}
@@ -685,37 +707,21 @@ function OverviewTab({ state, quest, actions }) {
                 href={`#quest/${id}/documents`}
                 className="text-xs font-medium text-emerald-400 hover:text-emerald-300"
               >
-                Open Documents View →
+                Read full document →
               </a>
             </div>
           </CardHeader>
           <CardContent className="space-y-4 p-5">
-            {/* Target Repos & Scope Metadata Bar */}
-            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-zinc-800/90 bg-zinc-950/60 px-3.5 py-2.5 text-xs">
-              <span className="font-medium text-zinc-400">Target Repos:</span>
-              {linkedRepos.length > 0 ? (
-                linkedRepos.map((repo) => (
-                  <span
-                    key={repo.id}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700/80 bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-zinc-200"
-                  >
-                    <GitFork className="size-3 text-emerald-400" />
-                    {repo.name}
-                  </span>
-                ))
-              ) : (
-                <span className="text-zinc-500">No repositories linked</span>
-              )}
-              <span className="ml-auto text-zinc-400">
-                Scope: <strong className="text-zinc-200">{completedTasks}/{tasks.length} tasks</strong>
-              </span>
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-zinc-300">Implementation progress</span>
+              <a href={`#quest/${id}/tasks`} className="font-medium text-emerald-400">{completedTasks} / {tasks.length} tasks completed →</a>
             </div>
-
+            <progress className="dq-scope-progress" value={completedTasks} max={tasks.length || 1} aria-label="Completed implementation tasks" />
             {/* Rendered Markdown Brief */}
-            {sourceDoc?.content ? (
+            {brief ? (
               <article
-                className="markdown-view max-h-[420px] overflow-y-auto rounded-lg border border-zinc-800/70 bg-zinc-950/50 p-4 text-sm leading-relaxed text-zinc-200"
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(sourceDoc.content) }}
+                className="markdown-view dq-brief-excerpt"
+                dangerouslySetInnerHTML={{ __html: brief }}
               />
             ) : (
               <div className="rounded-lg border border-dashed border-zinc-800 bg-zinc-950/40 p-6 text-center text-xs text-zinc-400">
@@ -748,17 +754,19 @@ function OverviewTab({ state, quest, actions }) {
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="truncate text-xs font-semibold text-zinc-100">{repo.name}</p>
-                      <p className="truncate font-mono text-[11px] text-zinc-500">{repo.path}</p>
+
                     </div>
                     <StatusPill status={repo.status} />
                   </div>
-                  <div className="flex flex-wrap items-center gap-3 text-[11px] text-zinc-400">
-                    <span className="inline-flex items-center gap-1 font-mono text-zinc-300">
+                  <details className="text-xs text-zinc-400"><summary className="cursor-pointer">Branch & local folder</summary>
+                  <p className="mt-2 break-all font-mono">{repo.path}</p>
+                  <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-zinc-400">
+                    <span className="inline-flex items-center gap-1 break-all font-mono text-zinc-300">
                       <GitBranch className="size-3 text-emerald-400" />
                       {repo.branch}
                     </span>
                     <span>→ target: {repo.target}</span>
-                  </div>
+                  </div></details>
                 </div>
               ))
             ) : (
@@ -788,11 +796,6 @@ function OverviewTab({ state, quest, actions }) {
               <ol className="dq-timeline space-y-5">
                 {recentRuns.map((run) => {
                   const role = roleForRun(run);
-                  const summary = String(
-                    run.error ||
-                      (run.summary || "").replace(/^\s*DEVQUEST_WAITING_INPUT\b[ \t]*(?:\r?\n)?/, "") ||
-                      "Executing current workflow stage",
-                  ).slice(0, 160);
                   return (
                     <li key={run.id} className="relative flex gap-3">
                       <span className="relative z-10 flex size-8 shrink-0 items-center justify-center rounded-full border border-zinc-700 bg-zinc-950 text-emerald-400">
@@ -806,7 +809,7 @@ function OverviewTab({ state, quest, actions }) {
                           <StatusPill status={run.state} />
                         </div>
                         <p className="break-words text-xs leading-relaxed text-zinc-400">
-                          {summary}
+                          {STAGE_NAMES[run.purpose] || run.purpose} · {formatTime(run.updatedAt || run.createdAt)}
                         </p>
                         <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] text-zinc-500">
                           <span>
@@ -957,6 +960,15 @@ function DocumentsTab({ state, quest, focusDocument }) {
 
   const activeEntry = docItems.find((d) => d.key === selectedKey) || docItems[0];
   const activeDoc = activeEntry?.doc;
+  const documentContent = readableDocument(activeDoc?.content);
+
+  const sectionLinks = documentContent.headings.filter(h => h.depth >= 2 && h.depth <= 3).map(h => (
+                <button key={h.id} type="button" onClick={() => {
+                  const heading = document.getElementById(h.id);
+                  heading?.scrollIntoView({ block: "start" });
+                  heading?.focus({ preventScroll: true });
+                }}>{h.title}</button>
+              ));
 
   const isStaleSpec =
     activeEntry?.key === "spec" &&
@@ -976,13 +988,21 @@ function DocumentsTab({ state, quest, focusDocument }) {
   };
 
   return (
-    <div className="grid items-start gap-5 lg:grid-cols-[minmax(220px,25fr)_minmax(0,75fr)]">
+    <div className="dq-document-layout">
+      <div className="dq-mobile-document-picker">
+        <label>Document
+          <select value={activeEntry.key} onChange={event => {setSelectedKey(event.target.value); setCopied(false);}}>
+            {docItems.map(item => <option key={item.key} value={item.key}>{item.title}{item.doc ? ` · r${item.doc.revision}` : " · Not generated"}</option>)}
+          </select>
+        </label>
+        {viewMode === "viewer" && documentContent.headings.length > 1 && <details className="dq-document-outline"><summary>On this page</summary><nav aria-label="Document sections">{sectionLinks}</nav></details>}
+      </div>
       {/* LEFT FILE TREE NAV (25%) */}
-      <Card className="border-zinc-800 bg-zinc-900">
+      <Card className="dq-document-navigation border-zinc-800 bg-zinc-900">
         <CardHeader className="border-b border-zinc-800/80 px-4 py-3.5">
           <div className="flex items-center justify-between">
             <CardTitle className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-              Document Tree
+              Documents
             </CardTitle>
             <Badge variant="outline" className="border-zinc-700 text-[10px] text-zinc-400">
               {docItems.filter((d) => d.doc).length}/{docItems.length} saved
@@ -996,6 +1016,7 @@ function DocumentsTab({ state, quest, focusDocument }) {
             return (
               <button
                 key={item.key}
+                aria-pressed={selected}
                 type="button"
                 onClick={() => {
                   setSelectedKey(item.key);
@@ -1013,7 +1034,6 @@ function DocumentsTab({ state, quest, focusDocument }) {
                   />
                   <div className="min-w-0">
                     <p className="truncate font-medium">{item.title}</p>
-                    <p className="truncate font-mono text-[10px] text-zinc-500">{item.fileName}</p>
                   </div>
                 </div>
                 {hasDoc ? (
@@ -1029,10 +1049,18 @@ function DocumentsTab({ state, quest, focusDocument }) {
             );
           })}
         </CardContent>
+        {viewMode === "viewer" && documentContent.headings.length > 1 && (
+          <details className="dq-document-outline" open>
+            <summary>On this page</summary>
+            <nav aria-label="Document sections">
+              {sectionLinks}
+            </nav>
+          </details>
+        )}
       </Card>
 
       {/* RIGHT DOCUMENT VIEWPORT (75%) */}
-      <Card className="min-w-0 border-zinc-800 bg-zinc-900">
+      <Card className="dq-document-reader min-w-0 border-zinc-800 bg-zinc-900">
         <CardHeader className="border-b border-zinc-800/80 px-5 py-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="space-y-1">
@@ -1056,7 +1084,7 @@ function DocumentsTab({ state, quest, focusDocument }) {
                 )}
               </div>
               {activeDoc?.file && (
-                <p className="truncate font-mono text-[11px] text-zinc-500">{activeDoc.file}</p>
+                <details className="text-xs text-zinc-400"><summary className="cursor-pointer">Local file details</summary><p className="mt-2 break-all font-mono">{activeDoc.file}</p></details>
               )}
             </div>
 
@@ -1198,8 +1226,8 @@ function DocumentsTab({ state, quest, focusDocument }) {
               <article
                 tabIndex={0}
                 aria-label={`${activeEntry.title} rendered Markdown`}
-                className="markdown-view max-h-[640px] overflow-y-auto rounded-lg border border-zinc-800 bg-zinc-950 p-6 text-sm leading-relaxed text-zinc-200"
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(activeDoc.content) }}
+                className="markdown-view dq-readable-document"
+                dangerouslySetInnerHTML={{ __html: documentContent.html }}
               />
             )
           ) : (
@@ -1268,8 +1296,11 @@ function WorkTab({ state, quest }) {
     { key: "done", title: "Done", items: tasks.filter((t) => classifyTask(t) === "done") },
   ];
 
+  const allCompleted = tasks.length > 0 && tasks.every(t => classifyTask(t) === "done");
+  const visibleColumns = allCompleted ? [{ ...columns[3], title: "Completed tasks" }] : columns;
+
   const getTaskTestPill = (task) => {
-    if (task.validation?.passed === true || task.state === "COMPLETED") {
+    if (task.validation?.passed === true) {
       return (
         <span className="inline-flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300">
           <CheckCircle2 className="size-3" />
@@ -1296,8 +1327,9 @@ function WorkTab({ state, quest }) {
   return (
     <div className="space-y-6">
       {/* 4-Column Task Pipeline View */}
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {columns.map((col) => (
+      {allCompleted && <p className="text-sm text-zinc-400">All {tasks.length} implementation tasks are complete. Test evidence and Jira links remain available below. PR review and merge are separate.</p>}
+      <div className={allCompleted ? "dq-completed-board" : "grid gap-4 md:grid-cols-2 xl:grid-cols-4"}>
+        {visibleColumns.map((col) => (
           <Card key={col.key} className="flex flex-col border-zinc-800 bg-zinc-900">
             <CardHeader className="border-b border-zinc-800/80 px-4 py-3">
               <div className="flex items-center justify-between">
@@ -1309,7 +1341,7 @@ function WorkTab({ state, quest }) {
                 </Badge>
               </div>
             </CardHeader>
-            <CardContent className="flex-1 space-y-3 p-3">
+            <CardContent className={allCompleted ? "grid items-start gap-3 p-3 md:grid-cols-2 xl:grid-cols-3" : "flex-1 space-y-3 p-3"}>
               {col.items.length > 0 ? (
                 col.items.map((task) => {
                   const repo = (state.repositories || []).find((r) => r.id === task.repoId);
@@ -1333,9 +1365,7 @@ function WorkTab({ state, quest }) {
                           {task.key}
                         </span>
                         {task.jira?.key && (
-                          <span className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
-                            {task.jira.key}
-                          </span>
+                          <a href={safeUrl(task.jira.url)} target="_blank" rel="noreferrer" className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-emerald-300 underline">{task.jira.key} ↗</a>
                         )}
                         <StatusPill status={task.state} />
                       </div>
@@ -1373,9 +1403,7 @@ function WorkTab({ state, quest }) {
                       )}
 
                       {task.validation?.summary && (
-                        <pre className="max-h-20 overflow-auto rounded border border-zinc-800/80 bg-zinc-900/90 p-2 font-mono text-[10px] text-zinc-300">
-                          {task.validation.summary}
-                        </pre>
+                        <details className="text-xs text-zinc-400"><summary className="cursor-pointer">Test evidence</summary><pre tabIndex={0} aria-label={`${task.key} test evidence`} className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap rounded border border-zinc-800 p-2 font-mono text-xs text-zinc-300">{task.validation.summary}</pre></details>
                       )}
 
                       {/* Task Controls */}
@@ -1754,7 +1782,8 @@ function WorkTab({ state, quest }) {
 function RoomTab({ state, quest, actions }) {
   const id = quest.id;
   const room = state.questRooms?.[id];
-  const timeline = room?.timeline || [];
+  const [taskFilter, setTaskFilter] = useState("all");
+  const timeline = roomGroups(room?.timeline || []).filter(group => taskFilter === "all" || group.entries.some(entry => (state.runs || []).find(run => run.id === entry.runId)?.taskId === taskFilter)).flatMap(group => group.entries.map((entry, index) => ({ ...entry, groupStart: index === 0, groupId: group.id, groupCount: group.entries.length })));
   const runs = (state.runs || []).filter((r) => r.questId === id);
 
   // Eligible stopped runs that can receive a directed instruction
@@ -1821,7 +1850,7 @@ function RoomTab({ state, quest, actions }) {
             <div className="flex items-center gap-2.5">
               <Terminal className="size-4 text-emerald-400" />
               <CardTitle className="text-sm font-semibold text-zinc-100">
-                Agent Room · Live Execution & Decision Stream
+                Agent Room · Runs & decisions
               </CardTitle>
             </div>
             <div className="flex items-center gap-2 text-xs text-zinc-400">
@@ -1832,7 +1861,8 @@ function RoomTab({ state, quest, actions }) {
           </div>
         </CardHeader>
 
-        <CardContent className="max-h-[520px] space-y-4 overflow-y-auto p-5">
+        <div className="px-5 pt-4"><label className="text-xs text-zinc-400">Workflow task<select className="ml-3 max-w-full rounded border border-zinc-700 bg-zinc-950 p-2" value={taskFilter} onChange={event => setTaskFilter(event.target.value)}><option value="all">All tasks and design sessions</option>{state.tasks.filter(task => task.questId === id).map(task => <option key={task.id} value={task.id}>{task.key} · {task.title}</option>)}</select></label><p className="mt-2 text-xs text-zinc-400">Grouped by AgentRun, newest group first. Historical failures remain visible; replies start another turn and may use paid usage.</p></div>
+        <CardContent className="max-h-[620px] space-y-4 overflow-y-auto p-5" tabIndex={0} aria-label="Agent run history">
           {/* Active Running Sessions Live Stream */}
           {runs
             .filter((r) => r.state === "RUNNING")
@@ -1882,12 +1912,13 @@ function RoomTab({ state, quest, actions }) {
                   >
                     {actions.runProgress ? actions.runProgress(run) : "Agent session running…"}
                   </p>
-                  <pre
+                  <details><summary className="cursor-pointer text-xs text-zinc-400">Live output</summary><pre
+                    tabIndex={0} aria-label="Live agent output"
                     data-output={run.id}
                     className="max-h-48 overflow-auto rounded border border-zinc-800 bg-zinc-900/90 p-3 font-mono text-xs text-zinc-200"
                   >
                     {run.summary || "Streaming live agent output…"}
-                  </pre>
+                  </pre></details>
                 </div>
               );
             })}
@@ -1899,7 +1930,7 @@ function RoomTab({ state, quest, actions }) {
                 const isAgent = entry.kind === "agent";
                 const canReply =
                   isAgent && stoppedRuns.some((r) => r.id === entry.runId);
-                const entryRun = stoppedRuns.find(r=>r.id===entry.runId);
+                const entryRun = runs.find(r=>r.id===(entry.runId || entry.resultRunId || entry.successorRunId));
                 const entryTask = state.tasks.find(t=>t.id===entryRun?.taskId);
                 const retryLimit = Math.max(quest.execution?.limits?.retries || 0, entryTask?.manualRetryLimit || 0);
                 const needsRetryAllowance = canReply && entryRun.state !== "WAITING_INPUT" && entryTask &&
@@ -1907,8 +1938,9 @@ function RoomTab({ state, quest, actions }) {
                 return (
                   <li
                     key={entry.id || idx}
-                    className="rounded-lg border border-zinc-800 bg-zinc-950/80 p-4"
+                    className={`rounded-lg border bg-zinc-950/80 p-4 ${["FAILED", "BLOCKED", "WAITING_INPUT"].includes(entry.state) ? "border-amber-500/40" : "border-zinc-800"}`}
                   >
+                    {entry.groupStart && <p className="mb-3 text-xs text-zinc-400">{entryTask ? `${entryTask.key} · ${entryTask.title}` : "Project session / note"} · Run {String(entry.groupId).slice(0, 8)} · {entry.groupCount} entries</p>}
                     <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/70 pb-2.5">
                       <div className="flex flex-wrap items-center gap-2">
                         <span
@@ -1925,6 +1957,7 @@ function RoomTab({ state, quest, actions }) {
                           {entry.stage || entry.kind}
                         </span>
                         {entry.state && <StatusPill status={entry.state} />}
+                        {isAgent && entryRun && entryRun.state !== entry.state && <span className="text-xs text-zinc-400">Historical attempt · current run: {entryRun.state.replaceAll("_", " ")}</span>}
                       </div>
                       <div className="flex items-center gap-2">
                         {entry.createdAt && (
@@ -1942,6 +1975,7 @@ function RoomTab({ state, quest, actions }) {
                               if (run) {
                                 setMode("instruction");
                                 setSelectedRunToken(`${run.id}|${run.updatedAt || ""}`);
+                                document.getElementById("room-instruction")?.focus();
                               }
                             }}
                             className="rounded border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20"
@@ -1952,9 +1986,8 @@ function RoomTab({ state, quest, actions }) {
                       </div>
                     </div>
 
-                    <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-zinc-200">
-                      {entry.body}
-                    </pre>
+                    <p className="mt-3 break-words text-sm leading-relaxed text-zinc-200">{roomSummary(entry.body)}</p>
+                    <details className="mt-3 text-xs text-zinc-400"><summary className="cursor-pointer">Full output / raw JSON</summary><pre tabIndex={0} aria-label="Full saved agent output" className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-zinc-300">{typeof entry.body === "string" ? entry.body : JSON.stringify(entry.body, null, 2)}</pre></details>
 
                     {entry.delivery && (
                       <div className="mt-2.5 flex flex-wrap items-center gap-2 rounded border border-zinc-800 bg-zinc-900/70 px-3 py-1.5 text-[11px] text-zinc-400">
@@ -2042,13 +2075,13 @@ function RoomTab({ state, quest, actions }) {
               <input type="hidden" name="questId" value={id} />
               <input type="hidden" name="requestId" value={requestId} />
               <div className="flex flex-wrap items-center gap-3">
-                <label className="text-xs font-medium text-zinc-300">Target Stopped Agent:</label>
-                <select
+                <label htmlFor="room-target-run" className="text-xs font-medium text-zinc-300">Target Stopped Agent:</label>
+                <select id="room-target-run"
                   name="runToken"
                   required
                   value={selectedRunToken}
                   onChange={(e) => setSelectedRunToken(e.target.value)}
-                  className="h-9 flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs leading-5 text-zinc-200"
+                  className="h-9 min-w-0 max-w-full flex-1 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs leading-5 text-zinc-200"
                 >
                   {stoppedRuns.map((r) => {
                     const tokenVal = `${r.id}|${r.updatedAt || ""}`;
@@ -2060,7 +2093,7 @@ function RoomTab({ state, quest, actions }) {
                   })}
                 </select>
               </div>
-              <textarea
+              <textarea id="room-instruction" aria-label="Room note or agent instruction"
                 name="message"
                 required
                 rows={3}
@@ -2098,7 +2131,7 @@ function RoomTab({ state, quest, actions }) {
               className="space-y-3"
             >
               <input type="hidden" name="questId" value={id} />
-              <textarea
+              <textarea id="room-instruction" aria-label="Room note or agent instruction"
                 name="message"
                 required
                 rows={3}
@@ -2370,9 +2403,7 @@ export function ProjectDetail({
   const runs = (state.runs || []).filter((r) => r.questId === quest.id);
   const tasks = (state.tasks || []).filter((t) => t.questId === quest.id);
   const blocked =
-    latestRunAttempts(runs).some((run) =>
-      /FAILED|WAITING_INPUT|INTERRUPTED|PAUSED/.test(run.state),
-    ) ||
+    currentAttentionRuns(state, quest.id).length > 0 ||
     (state.works || []).some(
       (work) => work.questId === quest.id && work.state === "RECOVERY_REQUIRED",
     );
@@ -2382,7 +2413,7 @@ export function ProjectDetail({
     { num: 2, label: "Plan", tab: "documents" },
     { num: 3, label: "Build", tab: "work" },
     { num: 4, label: "Review", tab: "work" },
-    { num: 5, label: "Done", tab: "overview" },
+    { num: 5, label: "Handoff", tab: "tasks" },
   ];
 
   const navTabs = [
@@ -2403,7 +2434,7 @@ export function ProjectDetail({
   return (
     <div className="dq-dashboard min-h-full space-y-5 bg-zinc-950 text-zinc-100">
       {/* 1. COMPACT UNIVERSAL HEADER (STICKY TOP) */}
-      <header className="sticky top-0 z-30 -mx-1 rounded-b-xl border-b border-zinc-800 bg-zinc-950/95 px-4 pt-3 shadow-lg backdrop-blur">
+      <header className={`sticky top-0 z-30 -mx-1 rounded-b-xl border-b border-zinc-800 bg-zinc-950/95 px-4 pt-3 shadow-lg backdrop-blur ${normalizedTab === "documents" ? "dq-document-project-header" : ""}`}>
         {/* Row 1: Breadcrumb, Status Badges, and Actions */}
         <div className="flex flex-wrap items-center justify-between gap-3 pb-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -2466,7 +2497,7 @@ export function ProjectDetail({
             className="flex flex-wrap items-center gap-1"
           >
             {steps.map((step, idx) => {
-              const done = idx < stageIdx || quest.state === "PRS_CREATED";
+              const done = idx < stageIdx;
               const current = idx === stageIdx && !done;
               return (
                 <li key={step.label} className="flex items-center">

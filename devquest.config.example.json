@@ -1,4 +1,5 @@
 {
+  "confluence": { "provider": "atlassian-mcp", "host": "https://your-company.atlassian.net", "mcpServer": "atlassian" },
   "sourceControl": { "reviewers": [] },
   "googleChat": { "webhookEnv": "DEVQUEST_GOOGLE_CHAT_WEBHOOK" },
   "testing": { "credentialEnv": [] },

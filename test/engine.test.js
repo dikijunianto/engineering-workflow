@@ -18,6 +18,31 @@ function git(cwd, ...args) {
 }
 import { fixture } from "./engine-fixture.js";
 
+test("Confluence intake requires deliberate repository scope, keeps large PRDs and leaves the workflow queue free", async (t) => {
+  const f = await fixture(t);
+  let complete;
+  f.adapters.confluence.fetch = () => new Promise(resolve => { complete = resolve; });
+  const input = {
+    kind: "PRODUCT", title: "Large synthetic PRD", sourceType: "confluence",
+    url: "https://fixture.example.test/wiki/pages/1", importId: "be5c2ac5-c4eb-4844-b284-d6db6f2c0411",
+  };
+  await assert.rejects(f.engine.action("CREATE_QUEST", input), /select at least one repository/);
+  await assert.rejects(f.engine.action("CREATE_QUEST", { ...input, sourceType: "text", content: "Hi", repositoryIds: [] }), /select at least one repository/);
+  const inFlight = f.engine.action("CREATE_QUEST", { ...input, repositoryIds: [f.repos[0].id] });
+  const other = await f.engine.action("CREATE_QUEST", {
+    kind: "TECH", title: "Other work", content: "Local idea", repositoryIds: [f.repos[1].id],
+  });
+  assert.equal(other.title, "Other work");
+  const content = "A".repeat(101_000) + "End of saved PRD";
+  complete({ content, sources: [], warnings: [] });
+  const quest = await inFlight;
+  assert.equal(f.store.content(f.store.latest(quest.id, "prd")), content);
+  assert.match(f.engine.context(quest, "analysis"), /PRD excerpt/);
+  assert.doesNotMatch(f.engine.context(quest, "analysis"), /End of saved PRD/);
+  await assert.rejects(f.engine.action("ANALYZE_PRD", { questId: quest.id }), /Confirm incomplete context/);
+  assert.equal((await f.engine.action("CREATE_QUEST", { ...input, repositoryIds: [f.repos[0].id] })).id, quest.id);
+});
+
 test("human gates cannot be bypassed and approvals bind document revisions", async (t) => {
   const f = await fixture(t);
   await assert.rejects(f.engine.action("GENERATE_PLAN", { questId: f.quest.id }), /trd is missing/);

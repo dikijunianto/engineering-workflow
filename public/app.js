@@ -22,6 +22,7 @@ let state,
   workspaceJiraDirty = false;
 const liveOutput = new Map();
 const documentModes = new Map();
+let jiraProjectFilter = "", jiraSearch = "";
 const markdown = new Marked({
   renderer: {
     html({ text }) {
@@ -391,14 +392,23 @@ function runCard(run) {
       : "No summary is available yet. Inspect the preserved worktree and save points before continuing.");
   return `<section class="panel run-card ${role.key}" data-agent-run="${esc(run.id)}"><div class="row-head"><div class="run-identity"><span class="role-avatar">${icon(role.key)}</span><div><small>${role.label} · ${runtimeName(run.runtime)}</small><h3>${esc(run.displayName || task?.title || run.purpose)}</h3></div></div>${badge(run.state)}</div><p class="panel-body muted" data-run-progress="${esc(run.id)}" role="status">${esc(runProgress(run))}</p>${["jira_appendix_generation", "jira_publish"].includes(run.purpose) ? `<div class="panel-body"><small>Skill: ${esc(run.skill || "create-appendix-task-list")} · ${esc(run.phase || run.state)}<br>Model: ${esc(run.actualModel || run.resolvedModel || "Unavailable")} · ${esc(run.resolvedEffort || "Unavailable")}<br>Elapsed: <span data-agent-elapsed data-start="${esc(run.startedAt || run.createdAt)}" data-end="${esc(run.finishedAt || (run.state !== "RUNNING" ? run.updatedAt : "") || "")}">${Math.max(0, Math.floor((Date.parse(run.finishedAt || (run.state !== "RUNNING" && run.updatedAt) || new Date().toISOString()) - Date.parse(run.startedAt || run.createdAt)) / 1000))}s</span> · Last progress: ${run.lastProgressAt ? time(run.lastProgressAt) : "Awaiting process"}</small></div>` : ""}${run.pid ? `<small class="truncate" title="${esc(run.cwd)}">Process ${run.pid} · ${esc(run.cwd)}</small>` : ""}${["PAUSED", "INTERRUPTED"].includes(run.state) ? `<div class="savepoint-note">${icon("clock")}<div><strong>Progress preserved</strong><small>Last Save Point${run.updatedAt ? ` · ${time(run.updatedAt)}` : ""}. Continue when you are ready.</small></div></div>` : ""}<pre class="run-output" data-output="${run.id}" tabindex="0" aria-label="Agent response">${esc(responseText(output))}</pre>${run.registeredSkills?.length ? `<details class="panel-body"><summary>Assigned guidance · ${run.registeredSkills.length}</summary><ul>${run.registeredSkills.map((skill) => `<li>${esc(skill.name)} · revision ${skill.revision} · ${esc(skill.runtime)}<br><code>${esc(skill.hash)}</code><br>Guidance included in prompt; native invocation and semantic consumption unverified.</li>`).join("")}</ul></details>` : ""}${agentProfileDetails(run)}${run.accessPreflight ? `<details class="panel-body"><summary>Repository access: ${esc(run.accessPreflight.status)}</summary><pre class="document">${esc(JSON.stringify({ ...run.accessPreflight, arguments: run.cliArguments }, null, 2))}</pre></details>` : ""}${run.route ? `<details class="panel-body"><summary>Model routing & usage</summary><p>${esc(run.role)} · ${esc(run.runtime)} · requested ${esc(run.requestedModel)} / ${esc(run.requestedEffort)} · resolved ${esc(run.resolvedModel)} / ${esc(run.resolvedEffort)}</p><p>Runtime-reported model: ${esc(run.actualModel || "NOT_AVAILABLE")} · ${esc(run.route.complexity)} / ${esc(run.route.risk)}</p><p>${esc(run.route.reason)}</p><small>Input tokens: ${esc(run.usage?.input_tokens ?? "NOT_AVAILABLE")} · Output tokens: ${esc(run.usage?.output_tokens ?? "NOT_AVAILABLE")} · Cost: NOT_AVAILABLE · Duration: ${esc(run.durationMs ?? "NOT_AVAILABLE")} ms</small><p>Optimization bootstrap: ${esc(JSON.stringify(run.optimizations || {}))}</p></details>` : ""}<div class="task-actions">${run.state === "RUNNING" ? button("Pause", "PAUSE_AGENT", { "run-id": run.id }) + button(run.purpose === "jira_appendix_generation" ? "Cancel generation" : "Interrupt", run.purpose === "jira_appendix_generation" ? "CANCEL_APPENDIX" : "INTERRUPT_AGENT", { "run-id": run.id }, "danger") : ""}${waiting && task?.state !== "COMPLETED" ? button("Continue", "CONTINUE_AGENT", { "run-id": run.id }, "primary small") : ""}${run.purpose === "jira_appendix_generation" && ["WAITING_INPUT", "PAUSED", "INTERRUPTED"].includes(run.state) ? button("Cancel generation", "CANCEL_APPENDIX", { "run-id": run.id }, "danger small") : ""}${button("Save checkpoint", "checkpoint", { "run-id": run.id }, "small")}</div>${waiting ? `<form data-form="message" data-run="${run.id}"><label>Instruction for this agent<textarea name="message" rows="2" required placeholder="Clarify a decision or give the next instruction…"></textarea></label><button class="btn small" type="submit">Send instruction ↗</button><div class="form-error" role="alert"></div></form>` : `<small>${run.purpose === "jira_publish" ? "Review publication results and use explicit publication confirmation for another attempt." : (run.contractVersion === 1 || run.purpose === "jira_appendix_generation") && ["COMPLETED", "CANCELLED"].includes(run.state) ? "Use the Project actions to review or regenerate the appendix." : "Pause the current turn to send a new instruction."}</small>`}</section>`;
 }
+function filterJiraRows() {
+  const rows = [...document.querySelectorAll("[data-jira-row]")];
+  for (const row of rows) row.hidden = Boolean(jiraProjectFilter && row.dataset.project !== jiraProjectFilter) || !row.textContent.toLowerCase().includes(jiraSearch.trim().toLowerCase());
+  const count = document.querySelector("[data-jira-count]");
+  if (count) count.textContent = `${rows.filter(row => !row.hidden).length} of ${rows.length} execution tasks`;
+}
+
 function jira() {
   const tasks = state.tasks.filter((t) => t.jira);
+  const projects = [...new Set(tasks.map(t => t.questId))].map(id => ({ id, title: [...state.quests, ...(state.deletedQuests || [])].find(q => q.id === id)?.title || id }));
+  if (!projects.some(p => p.id === jiraProjectFilter)) jiraProjectFilter = "";
   return (
     head("Jira tasks", "Your approved plans, published with an explicit action.") +
     panel(
       "Published tasks",
       tasks.length
-        ? `<div class="table-scroll" tabindex="0" role="region" aria-label="Published Jira tasks"><table><thead><tr><th>Issue</th><th>Task</th><th>Repository</th><th>State</th></tr></thead><tbody>${tasks.map((t) => `<tr><td>${(t.jira.issues || [t.jira]).map((issue) => `<a class="table-title" href="${safeUrl(issue.url)}" target="_blank" rel="noreferrer">${esc(issue.key)} ↗</a>`).join("<br>")}</td><td>${esc(t.title)}</td><td>${esc(repository(t.repoId)?.name)}</td><td>${badge(t.state)}</td></tr>`).join("")}</tbody></table></div>`
+        ? `<div class="panel-body"><div class="dq-jira-filters"><label>Project<select id="jira-project-filter" data-jira-project><option value="">All projects</option>${projects.map(p => `<option value="${esc(p.id)}"${p.id === jiraProjectFilter ? " selected" : ""}>${esc(p.title)}</option>`).join("")}</select></label><label>Search tasks or Jira issues<input type="search" data-jira-filter value="${esc(jiraSearch)}" placeholder="Task, issue key, repository or state"></label></div><p data-jira-count role="status">${tasks.length} execution tasks</p></div><div class="table-scroll" tabindex="0" role="region" aria-label="Published Jira tasks"><table><thead><tr><th>Execution task</th><th>Jira issues</th><th>Repository</th><th>State</th></tr></thead><tbody>${tasks.map((t) => { const issues = t.jira.issues || [t.jira]; return `<tr data-jira-row data-project="${esc(t.questId)}"><td><span class="dq-jira-project-name">${esc(projects.find(p => p.id === t.questId)?.title)}</span><a class="dq-jira-task-title" href="#quest/${esc(t.questId)}/tasks">${esc(t.key)} · ${esc(t.title)}</a></td><td><details><summary>${issues.length} ${issues.length === 1 ? "issue" : "issues"} · ${esc(issues[0]?.key || "")}${issues.length > 1 ? "…" : ""}</summary><div class="jira-issue-links">${issues.map(issue => `<a href="${safeUrl(issue.url)}" target="_blank" rel="noreferrer">${esc(issue.key)} ↗</a>`).join("")}</div></details></td><td>${esc(repository(t.repoId)?.name)}</td><td>${badge(t.state)}</td></tr>`; }).join("")}</tbody></table></div>`
         : empty("Nothing published yet",
             "Approve a plan, then use Publish Tasks to Jira in its Project.",
           ),
@@ -438,7 +448,7 @@ function settings() {
   return head("Settings & integrations", "Workspace preferences, agent runtimes and connected services.") + readinessView() +
     group("workspace", "Workspace", panel("Local workspace", `<div class="panel-body"><p>Data directory</p><div class="code">${esc(state.settings.dataDir)}</div><p>Maximum active sessions <strong>${state.settings.concurrency}</strong>. Repository branch policies are configured per repository.</p>${button("Reconcile saved state", "RECONCILE", {}, "small")}</div>`) + panel("Local configuration", `<div class="panel-body"><p>Machine-level settings are read at startup. Restart DevQuest after changing executable or integration settings.</p><div class="code">~/.devquest/config.json</div><small>Keep tokens out of this file. See README.md for setup.</small></div>`), true) +
     group("agents", "Agents & skills", panel("Agent runtimes", agentsPanel()) + panel("Local skills", `<div class="panel-body"><p>${esc((state.settings.localSkills || []).join(", ") || "No workflow skills configured.")}</p><a class="subtle-link" href="#skills">Manage skill library →</a></div>`)) +
-    group("integrations", "Integrations", panel("Jira Configuration", workspaceJiraForm()) + panel("Jira publishing skill", `<div class="panel-body">${badge(state.settings.jiraConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Uses your local /upload-task-to-jira skill and Claude Code’s Atlassian connection. Review each sample or batch before publishing more.</p><small>See docs/integrations.md for the bridge contract.</small></div>`) + panel("Confluence", `<div class="panel-body">${badge(state.settings.confluenceConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Import a main page and one level of directly linked pages. Credentials come from the configured environment or authentication provider.</p><small>Review the imported page list before generating a TRD.</small></div>`) + panel("GitHub", `<div class="panel-body"><p>Uses your existing GitHub CLI login. Each repository work produces one PR to its configured target. Each publication has its own action.</p><div class="code">gh auth login</div></div>`) + panel("Google Chat", `<div class="panel-body">${badge(state.settings.chatConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Set googleChat.webhookEnv to the environment variable holding your webhook. Requests retain a receipt and a stable retry ID.</p></div>`));
+    group("integrations", "Integrations", panel("Jira Configuration", workspaceJiraForm()) + panel("Jira publishing skill", `<div class="panel-body">${badge(state.settings.jiraConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Uses your local /upload-task-to-jira skill and Claude Code’s Atlassian connection. Review each sample or batch before publishing more.</p><small>See docs/integrations.md for the bridge contract.</small></div>`) + panel("Confluence", `<div class="panel-body">${badge(state.settings.confluenceConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>${state.settings.confluenceProvider === "atlassian-mcp" ? `Uses Claude Code’s existing Atlassian MCP connection (${esc(state.settings.confluenceMcpServer)}), with read-only tools and no paid model call.` : "Imports through the Confluence REST API using the configured authentication provider."}</p>${state.settings.confluenceHost ? `<p>Allowed site: <code>${esc(state.settings.confluenceHost)}</code></p>` : ""}<small>Imports the selected page and one level of direct links. Review the imported page list before generating a TRD. Connection and access are checked during import.</small></div>`) + panel("GitHub", `<div class="panel-body"><p>Uses your existing GitHub CLI login. Each repository work produces one PR to its configured target. Each publication has its own action.</p><div class="code">gh auth login</div></div>`) + panel("Google Chat", `<div class="panel-body">${badge(state.settings.chatConfigured ? "CONFIGURED" : "NOT_CONFIGURED")}<p>Set googleChat.webhookEnv to the environment variable holding your webhook. Requests retain a receipt and a stable retry ID.</p></div>`));
 }
 function appendixAttempt(id) {
   const managed = state.runs.filter(
@@ -566,7 +576,7 @@ function jiraInput(values) {
       : null;
   return result;
 }
-function questJiraDefault(repositoryIds = state.repositories.map((r) => r.id)) {
+function questJiraDefault(repositoryIds = []) {
   const w = workspaceJira(),
     matches = Object.values(w.projects).filter((p) =>
       p.repositoryIds?.some((id) => repositoryIds.includes(id)),
@@ -1365,6 +1375,7 @@ function render(force = false) {
     $("#navigation-toggle").setAttribute?.("aria-expanded", "false");
     if (wasOpen) $("#main").focus?.({ preventScroll: true });
   }
+  if (route === "jira") filterJiraRows();
   if (agentDialogRunId && $("#dialog").open) updateAgentRunDialog();
   lastRenderedProjectRoute = location.hash;
   for (const el of document.querySelectorAll("#main details[data-disclosure]"))
@@ -1427,7 +1438,9 @@ function executionFields() {
     .join("");
   return `<details><summary>Agent execution and model routing</summary><div class="panel-body"><div class="form-row"><label>Project runtime<select name="executionRuntime"><option value="claude">Claude Code</option><option value="codex">Codex</option></select></label><label>Mode<select name="executionMode"><option value="guided">Guided — manual approvals</option><option value="autonomous">Autonomous after plan approval and Jira linking</option></select></label></div><label>Routing<select name="routingMode"><option value="dynamic">Dynamic — Opus orchestrator</option><option value="manual">Manual — configured model</option></select></label><label>Project model override<select name="executionModel"><option value="">Use role / workspace policy</option>${options}</select></label><label>Effort<select name="executionEffort"><option>high</option><option>medium</option><option>low</option></select></label>${["architect", "planner", "developer", "reviewer"].map((role) => `<div class="form-row"><label>${role} runtime<select name="${role}Runtime"><option value="inherit">Inherit Project / developer</option><option value="claude">Claude Code</option><option value="codex">Codex</option></select></label><label>${role} model<select name="${role}Model"><option value="">Inherit policy</option>${options}</select></label></div>`).join("")}<details><summary>Orchestrator and budgets</summary><div class="panel-body"><label>Orchestrator runtime<select name="orchestratorRuntime"><option value="claude">Claude Code</option><option value="codex">Codex</option></select></label><label>Requested orchestrator model<input name="orchestratorModel" value="claude-opus-5-5"></label><label>Orchestrator effort<select name="orchestratorEffort"><option>high</option></select></label><label>Parallel developers<input name="developerLimit" type="number" min="1" max="${esc(state.settings.maxDeveloperAgents || 5)}" value="${esc(state.settings.maxDeveloperAgents || 5)}"></label><label>Task runtime (minutes)<input name="taskMinutes" type="number" min="1" max="240" value="60"></label><label>Human PR reviewers<input name="humanReviewers" placeholder="backend-lead, payment-owner"></label><label class="checks"><input type="checkbox" name="allowAutoPr">Permit PR creation after validated independent review in Autonomous mode</label><small>Never merges, deploys or releases. Jira publication remains explicit. Model availability requires the administrator registry; no Fable or implicit fallback. Unknown token/cost data stays unavailable.</small></div></details></div></details>`;
 }
-async function createProject(values) {
+let confluenceProgress;
+async function createProject(values, { importId, onProgress } = {}) {
+  if (!values.getAll("repositoryIds").length) throw new Error("Select at least one affected repository.");
   const data = {
     workflowVersion: 2,
     agentProfiles: { enabled: Boolean(values.get("agentProfilesEnabled")) },
@@ -1516,19 +1529,27 @@ async function createProject(values) {
     });
     data.file = { name: file.name, base64 };
   }
-  const result = await action("CREATE_QUEST", data);
-  location.hash = `quest/${result.id}/overview`;
-  return result;
+  if (importId) {
+    data.importId = importId;
+    confluenceProgress = { importId, onProgress };
+  }
+  try {
+    const result = await action("CREATE_QUEST", data);
+    location.hash = `quest/${result.id}/overview`;
+    return result;
+  } finally {
+    if (confluenceProgress?.importId === importId) confluenceProgress = undefined;
+  }
 }
 function newQuest() {
   if (!state.repositories.length) {
     toast("Register a repository first.");
     return addRepository();
   }
-  if (dashboardUI?.openCreateProject) return dashboardUI.openCreateProject({ state, jiraDefault: questJiraDefault(), onCreate: async (values) => { const result = await createProject(values); toast("Project created. No agent started."); return result; } });
+  if (dashboardUI?.openCreateProject) return dashboardUI.openCreateProject({ state, jiraDefault: questJiraDefault(), onCreate: async (values, options) => { const result = await createProject(values, options); toast("Project created. No agent started."); return result; } });
   dialog(
     "Create a Project",
-    `<div class="form-row"><label>What are you working on?<select name="kind"><option value="PRODUCT">New feature (PRD)</option><option value="TECH">Technical improvement</option><option value="BUG">Fix an existing bug</option></select></label><label>Sprint (optional)<input name="sprint" maxlength="80" placeholder="Sprint 42"></label></div><label data-qa-intake hidden>Existing QA Jira issue<input name="existingJiraKey" maxlength="100" placeholder="PROJECT-123" disabled><small>Link this issue after plan approval; no new Jira issue is needed.</small></label><label>Title<input name="title" required maxlength="160" placeholder="What are we building?"></label><label>Source<select name="sourceType"><option value="text">Local text / technical idea</option><option value="file">Local file (.md, .txt, .pdf, .docx)</option><option value="confluence">Confluence page</option></select></label><label data-source="text">Requirements or technical idea<textarea name="content" rows="6" placeholder="Describe the problem, desired outcome and constraints…"></textarea></label><label data-source="file" hidden>Choose a file<input name="file" type="file" accept=".md,.txt,.pdf,.docx"><small>Maximum 8 MB. Text PDFs only.</small></label><label data-source="confluence" hidden>Confluence page URL<input name="url" type="url" placeholder="https://company.atlassian.net/wiki/spaces/…"><small>Main page plus direct linked Confluence pages only.</small></label><label>Affected repositories <small>Selected repositories bound the architect's impact analysis.</small></label><div class="checks">${state.repositories.map((repo) => `<label><input type="checkbox" name="repositoryIds" value="${repo.id}" checked>${esc(repo.name)}</label>`).join("")}</div><details><summary>Jira settings · optional now</summary>${questJiraFields()}</details><details><summary>Advanced agent settings</summary><label class="checks"><input type="checkbox" name="agentProfilesEnabled">Enable versioned Agent Profiles (existing routing and permissions)</label>${executionFields()}</details>`,
+    `<div class="form-row"><label>What are you working on?<select name="kind"><option value="PRODUCT">New feature (PRD)</option><option value="TECH">Technical improvement</option><option value="BUG">Fix an existing bug</option></select></label><label>Sprint (optional)<input name="sprint" maxlength="80" placeholder="Sprint 42"></label></div><label data-qa-intake hidden>Existing QA Jira issue<input name="existingJiraKey" maxlength="100" placeholder="PROJECT-123" disabled><small>Link this issue after plan approval; no new Jira issue is needed.</small></label><label>Title<input name="title" required maxlength="160" placeholder="What are we building?"></label><label>Source<select name="sourceType"><option value="text">Local text / technical idea</option><option value="file">Local file (.md, .txt, .pdf, .docx)</option><option value="confluence">Confluence page</option></select></label><label data-source="text">Requirements or technical idea<textarea name="content" rows="6" placeholder="Describe the problem, desired outcome and constraints…"></textarea></label><label data-source="file" hidden>Choose a file<input name="file" type="file" accept=".md,.txt,.pdf,.docx"><small>Maximum 8 MB. Text PDFs only.</small></label><label data-source="confluence" hidden>Confluence page URL<input name="url" type="url" placeholder="https://company.atlassian.net/wiki/spaces/…"><small>Main page plus direct linked Confluence pages only.</small></label><label>Affected repositories <small>Selected repositories bound the architect's impact analysis.</small></label><div class="checks">${state.repositories.map((repo) => `<label><input type="checkbox" name="repositoryIds" value="${repo.id}">${esc(repo.name)}</label>`).join("")}</div><details><summary>Jira settings · optional now</summary>${questJiraFields()}</details><details><summary>Advanced agent settings</summary><label class="checks"><input type="checkbox" name="agentProfilesEnabled">Enable versioned Agent Profiles (existing routing and permissions)</label>${executionFields()}</details>`,
     "new-quest",
     "Create Project",
   );
@@ -1608,6 +1629,11 @@ function editArtifact(kind, questId) {
   );
 }
 document.addEventListener("input", (event) => {
+  if (event.target.matches?.("[data-jira-filter]")) {
+    jiraSearch = event.target.value;
+    filterJiraRows();
+    return;
+  }
   rememberCollaboration(event.target.closest?.("form[data-collaboration]"));
   if (event.target.closest("form")?.dataset?.form === "workspace-jira") workspaceJiraDirty = true;
   if (event.target.name !== "path") return;
@@ -1619,6 +1645,11 @@ document.addEventListener("input", (event) => {
   form.querySelector(".repository-preview").textContent = "Path changed. Check it before saving.";
 });
 document.addEventListener("change", (event) => {
+  if (event.target.matches?.("[data-jira-project]")) {
+    jiraProjectFilter = event.target.value;
+    filterJiraRows();
+    return;
+  }
   if (event.target.closest("form")?.dataset?.form === "react-create-project") return;
   if (event.target.name === "kind") {
     const form = event.target.closest("form");
@@ -2286,7 +2317,9 @@ try {
   };
   events.onmessage = (event) => {
     const data = JSON.parse(event.data);
-    if (data.type === "output") {
+    if (data.type === "confluence-progress") {
+      if (data.importId === confluenceProgress?.importId) confluenceProgress.onProgress?.(data.message);
+    } else if (data.type === "output") {
       const output = ((liveOutput.get(data.runId) || "") + data.text).slice(-16000);
       liveOutput.set(data.runId, output);
       const el = document.querySelector(`[data-output="${data.runId}"]`);

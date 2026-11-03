@@ -33,10 +33,10 @@ const AUTO_PLAY_DURATION_MS = 8500;
 export const ONBOARDING_STAGES = [
   {
     id: "pipeline",
-    stepNumber: "00",
+    workflowPhase: "Five workflow stages",
     shortTitle: "Full 3D Pipeline",
     badge: "System Architecture",
-    title: "How DevQuest Turns Ideas into Verified Pull Requests",
+    title: "From an idea to a reviewed pull request",
     subtitle:
       "A local-first, deterministic AI engineering workspace that guides product requirements, tech improvements, and QA bugs through gated design, Jira sync, isolated multi-agent coding, and independent review.",
     roles: ["Orchestrator", "Architect", "Planner", "Jira Specialist", "Developer ×5", "Reviewer"],
@@ -58,10 +58,10 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "intake",
-    stepNumber: "01",
-    shortTitle: "1. Intake & Repos",
+    workflowPhase: "Define",
+    shortTitle: "Intake & Repos",
     badge: "Define & scope",
-    title: "Multi-Source Requirement Intake & Repository Binding",
+    title: "Define the work and its scope",
     subtitle:
       "Start a Product Quest from documents, a Tech Quest from an engineering idea, or a bug fix linked to an existing QA Jira issue.",
     roles: ["Architect", "Repository Resolver"],
@@ -83,9 +83,9 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "analysis",
+    workflowPhase: "Define",
     shortTitle: "Analysis",
     badge: "Read-only discovery",
-    stepNumber: "02",
     title: "Inspect the selected repositories",
     subtitle: "Understand services and dependencies before choosing a design.",
     roles: ["Architect"],
@@ -107,10 +107,10 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "design",
-    stepNumber: "02",
-    shortTitle: "2. TRD & Plan Gates",
+    workflowPhase: "Plan",
+    shortTitle: "TRD & Plan Gates",
     badge: "Architecture & planning",
-    title: "AI Architect, Implementation Plan & Immutable Approval Gates",
+    title: "Review the design before building",
     subtitle:
       "Generate, inspect, and edit the Technical Requirements Document (TRD), optional Specification, and dependency-aware Implementation Plan.",
     roles: ["Architect", "Planner"],
@@ -132,10 +132,10 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "jira",
-    stepNumber: "03",
-    shortTitle: "3. Jira Appendix",
+    workflowPhase: "Plan",
+    shortTitle: "Jira Appendix",
     badge: "Backlog synchronization",
-    title: "Weighted Jira Appendix & Controlled Batch Publication",
+    title: "Prepare the Jira backlog",
     subtitle:
       "Translate your approved engineering plan into weighted Jira tasks with sample-first verification, or link an existing QA issue.",
     roles: ["Jira Specialist"],
@@ -145,10 +145,10 @@ export const ONBOARDING_STAGES = [
     mechanism:
       "The Jira Specialist Agent generates appendix.md from the approved plan. Uses local skills and Claude Code's authenticated Atlassian MCP connection to publish tickets.",
     governance:
-      "Publishes 1 sample issue first for verification, followed by explicit batches of at most 5 issues. Once published (or linked to a QA bug), the plan is frozen.",
+      "Review a sample before explicitly publishing the remaining issues. Publication checks and approvals remain in the project workflow.",
     highlights: [
       "Calibrated Backend Weights (V / L / M / H)",
-      "Sample-First Verification + Max 5 Batch Upload",
+      "Sample review + explicit publication",
       "Direct QA Bug Issue Linking Bypass",
       "Frozen Scope Guarantee After Publication",
     ],
@@ -157,10 +157,10 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "worktrees",
-    stepNumber: "04",
-    shortTitle: "4. Agent Worktrees",
+    workflowPhase: "Build",
+    shortTitle: "Agent Worktrees",
     badge: "Parallel execution",
-    title: "Task-Isolated Git Worktrees & Multi-Agent Orchestration",
+    title: "Build in isolated worktrees",
     subtitle:
       "Execute up to 5 concurrent Developer Agents in isolated Git worktrees with verified model routing and serialized branch integration.",
     roles: ["Orchestrator", "Developer ×5"],
@@ -182,25 +182,25 @@ export const ONBOARDING_STAGES = [
   },
   {
     id: "review",
-    stepNumber: "05",
-    shortTitle: "5. Review & PR",
+    workflowPhase: "Review → Handoff",
+    shortTitle: "Review & PR",
     badge: " Production Gate & Handoff",
-    title: "Independent Production Review, GitHub PR & Team Notification",
+    title: "Review changes, then hand off the PR",
     subtitle:
       "Audit integrated repository changes through an independent Reviewer Agent, create standardized Pull Requests, and notify Google Chat.",
-    roles: ["Reviewer", "GitHub CLI", "Google Chat"],
+    roles: ["Reviewer", "Human reviewer"],
     camera: { targetX: 425, targetY: 10, targetZ: 45, yaw: 0.35, pitch: 0.33, zoom: 1.45 },
     purpose:
       "Verify that all integrated tasks meet production readiness standards and human QA checklists before opening a Pull Request.",
     mechanism:
       "An independent Reviewer Agent inspects the integrated repository diff (bounded to 3 review/fix cycles). Generates office commit messages: <type> : <description> (branch).",
     governance:
-      "PR creation is explicit opt-in via authenticated gh CLI and verifies the remote head matches the reviewed commit. Reviewer assignment and Google Chat notifications are tracked with idempotent retries.",
+      "PR creation verifies the reviewed commit using the configured Git provider. Creating a PR does not prove external review or merge; those remain with your team.",
     highlights: [
       "Mandatory Independent Production-Readiness Gate",
       "Bounded Review/Fix Cycles (Max 3 Attempts)",
       "Human Tests & QA Observation Checklist",
-      "Verified GitHub PR + Google Chat Handoff",
+      "Verified PR handoff; human merge required",
     ],
     ctaLabel: "Start Building Now",
     ctaAction: "newProject",
@@ -292,8 +292,7 @@ export function Onboarding3DModal({ open, onOpenChange, state, actions = {}, ini
                 </Badge>
               </DialogTitle>
               <DialogDescription className="text-xs text-zinc-400">
-                Explore what DevQuest does and how requirements flow through AI agents, Git
-                worktrees, and human approval gates.
+                Five stages: Define → Plan → Build → Review → Handoff. Six scenes illustrate these stages; analysis belongs to Define and Jira preparation to Plan.
               </DialogDescription>
             </div>
           </div>
@@ -392,7 +391,7 @@ export function Onboarding3DModal({ open, onOpenChange, state, actions = {}, ini
                     {stage.badge}
                   </Badge>
                   <span className="font-mono text-xs text-zinc-400">
-                    {stageIndex === 0 ? "Overview" : `Station ${stageIndex} / 6`}
+                    {stage.workflowPhase}
                   </span>
                 </div>
 
@@ -497,7 +496,7 @@ export function Onboarding3DModal({ open, onOpenChange, state, actions = {}, ini
                     onClick={() => selectStage((stageIndex + 1) % ONBOARDING_STAGES.length)}
                     className="border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800"
                   >
-                    Next Stage
+                    Next scene
                     <ChevronRight className="size-4" />
                   </Button>
                 </div>

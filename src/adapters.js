@@ -28,6 +28,7 @@ import {
   verifyClaudeGrants,
 } from "./access.js";
 import { createRepositoryReader } from "./repository-reader.js";
+import { ConfluenceMcpAdapter, pageIdFromUrl, linkedUrls, storagePageTitles } from "./confluence-mcp.js";
 import { connectBitbucketMcp } from "./bitbucket-mcp.js";
 import { FolderPicker } from "./folder-picker.js";
 import { assertProfileInvocation } from "./agent-context.js";
@@ -699,6 +700,14 @@ export class AgentRuntime {
     runtimeProvider,
     purpose,
   } = {}) {
+    const redactRuntime = (value) => redact(
+      mcpConfig?.devquestReadUrl
+        ? String(value ?? "").replaceAll(mcpConfig.devquestReadUrl, "[local reader URL omitted]")
+        : value,
+      this.env,
+    );
+    if (mcpGuard?.stage === "confluence" && !localApiUrl)
+      throw new Error("Confluence MCP import requires the deterministic local API; paid model execution is not permitted");
     assertProfileInvocation({
       profileSnapshot,
       profileSnapshotHash,
@@ -782,7 +791,7 @@ export class AgentRuntime {
       const recorded = args.map((value, index) =>
         args[index - 1] === "--mcp-config"
           ? "[MCP configuration omitted]"
-          : redact(value, this.env),
+          : redactRuntime(value),
       );
       onEvent?.({
         type: "access",
@@ -790,7 +799,7 @@ export class AgentRuntime {
           ...preflight,
           boundary:
             this.name === "Codex" && mcpConfig?.devquestReadUrl
-              ? "Read-only sandbox and directory-limited DevQuest file reader; general shell/discovery tools disabled"
+              ? "Directory-limited DevQuest file reader; general shell/discovery tools disabled"
               : "Runtime restricted directories and role tool allowlist; descendants must still respect filesystem permissions",
         },
         arguments: recorded,
@@ -1102,8 +1111,8 @@ export class AgentRuntime {
       }
       if (parsed?.usage || (parsed?.type === "turn.completed" && parsed.usage))
         usage = parsed.usage;
-      if (event.text) event.text = redact(event.text, this.env);
-      if (event.error) event.error = redact(event.error, this.env);
+      if (event.text) event.text = redactRuntime(event.text);
+      if (event.error) event.error = redactRuntime(event.error);
       if (event.text) {
         parsedText = bounded(
           `${parsedText}${parsedText ? "\n" : ""}${event.text}`,
@@ -1187,10 +1196,10 @@ export class AgentRuntime {
       });
     }
     if (result.code !== 0)
-      throw commandError(this.executable, args, {
+      throw commandError(this.executable, args.map(redactRuntime), {
         ...result,
-        stderr: redact(result.stderr, this.env),
-        stdout: redact(result.stdout, this.env),
+        stderr: redactRuntime(result.stderr),
+        stdout: redactRuntime(result.stdout),
       });
     if (this.name === "Codex") {
       const reportedModel = result.stderr?.match(/^model:\s*([A-Za-z0-9._:/-]+)\s*$/m)?.[1];
@@ -1250,15 +1259,27 @@ export class CodexRuntime extends AgentRuntime {
   }
 
   async start(options = {}) {
-    if (!options.readOnly && options.accessScope?.readOnlyReferences?.length) {
+    if (!options.readOnly && options.accessScope?.repositories?.length) {
       const capabilities=await this.detectCapabilities();
       if (!capabilities.available || !this.help.includes("--ignore-user-config"))
         throw new Error("Codex lacks isolated configuration support for read-only task references");
-      const refs=options.accessScope.readOnlyReferences;
-      const reader=await createRepositoryReader({readOnly:true,cwd:refs[0].path,repositories:refs},call=>options.onEvent?.({type:"repository-tool",call}));
-      try {return await super.start({...options,sessionId:undefined,mcpConfig:{devquestReadUrl:reader.url},
-        prompt:options.prompt+"\nSelected read-only repository references: "+JSON.stringify(refs)+"\nUse mcp__devquest_repository__ReadRepositoryFile with repoId and relative path to inspect required reference files. Writes remain inside your assigned task worktree; no parent-directory access."});}
-      finally {await reader.close();}
+      const assigned = options.accessScope.repositories;
+      const references = options.accessScope.readOnlyReferences || [];
+      const reader = await createRepositoryReader(
+        { readOnly: true, cwd: options.cwd, repositories: [...assigned, ...references] },
+        (call) => options.onEvent?.({ type: "repository-tool", call }),
+      );
+      try {
+        return await super.start({
+          ...options,
+          sessionId: undefined,
+          mcpConfig: { devquestReadUrl: reader.url },
+          prompt: `${options.prompt}
+Use mcp__devquest_repository__ReadRepositoryFile with the listed repoId and a relative path ('.' lists the root). Assigned writable worktree read IDs: ${JSON.stringify(assigned)}. Read-only reference IDs: ${JSON.stringify(references)}. Apply changes only in the assigned worktree. No parent-directory access.`,
+        });
+      } finally {
+        await reader.close();
+      }
     }
     if (!options.readOnly || !options.accessScope) return super.start(options);
     const capabilities = await this.detectCapabilities();
@@ -1535,7 +1556,7 @@ export class ClaudeCodeRuntime extends AgentRuntime {
         throw new Error("CLI cannot enforce nested spawning restrictions");
       args.push(
         "--disallowedTools",
-        nativeSkill
+        (nativeSkill || mcpGuard?.stage === "confluence")
           ? "Agent,Task,TeamCreate,TeamDelete,Bash,NotebookEdit,Edit,Write"
           : repositoryReference ? "Agent,Task,TeamCreate,TeamDelete,Bash,NotebookEdit" : "Agent,Task,TeamCreate,TeamDelete,Bash,NotebookEdit,mcp__*",
       );
@@ -2385,35 +2406,6 @@ export class SkillRunner {
   }
 }
 
-function pageIdFromUrl(url) {
-  return /\/pages\/(\d+)(?:\/|$)/.exec(url.pathname)?.[1] ?? url.searchParams.get("pageId");
-}
-
-function linkedUrls(html, base) {
-  const urls = [];
-  for (const match of html.matchAll(/\bhref\s*=\s*["']([^"']+)["']/gi)) {
-    try {
-      urls.push(new URL(match[1].replaceAll("&amp;", "&"), base));
-    } catch {
-      // Invalid document links are ignored; the source body is still usable.
-    }
-  }
-  return urls;
-}
-
-function storagePageTitles(html) {
-  const decode = (value) =>
-    value
-      .replaceAll("&amp;", "&")
-      .replaceAll("&quot;", '"')
-      .replaceAll("&#39;", "'")
-      .replaceAll("&lt;", "<")
-      .replaceAll("&gt;", ">");
-  return [...html.matchAll(/<ri:page\b[^>]*\bri:content-title\s*=\s*["']([^"']+)["']/gi)].map(
-    (match) => decode(match[1]),
-  );
-}
-
 export class ConfluenceAdapter {
   constructor({
     host,
@@ -3034,10 +3026,14 @@ export async function createAdapters(config = {}) {
       mcpServer: config.workflow?.jiraMcpServer || "atlassian",
       bridge: config.skill?.bridge ?? config.jiraSkill?.bridge ?? config.jiraSkill,
     }),
-    confluence: new ConfluenceAdapter({
-      fetch: config.fetch,
-      ...(config.confluence ?? {}),
-    }),
+    confluence: config.confluence?.provider === "atlassian-mcp"
+      ? new ConfluenceMcpAdapter({
+          runtime: runtimes.claude,
+          mcpConfigPath: config.workflow?.jiraMcpConfig,
+          mcpServer: config.workflow?.jiraMcpServer,
+          ...config.confluence,
+        })
+      : new ConfluenceAdapter({ fetch: config.fetch, ...(config.confluence ?? {}) }),
     sourceControl: {
       async provider(input) {
         const remote=input.remote || await checked(runner,"git",["config","--get","remote.origin.url"],{cwd:input.path});

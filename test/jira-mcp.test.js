@@ -29,6 +29,9 @@ async function stub(
     spill,
     escapeSpill,
     spillText,
+    nativeSpill,
+    nativeSpillError,
+    wrongNativeMethod,
     oversizeSpill,
     wrongSpillName,
     truncated,
@@ -122,7 +125,7 @@ async function stub(
       }).then((r) => r.json());
       let content = remote.result.content;
       if (
-        (spill || escapeSpill || spillText || oversizeSpill || wrongSpillName || truncated) &&
+        (spill || escapeSpill || spillText || nativeSpill || nativeSpillError || wrongNativeMethod || oversizeSpill || wrongSpillName || truncated) &&
         call.name.endsWith("getJiraIssueTypeMetaWithFields")
       ) {
         if (truncated)
@@ -138,14 +141,16 @@ async function stub(
             "tool-results",
           );
           await mkdir(root, { recursive: true });
-          const file = path.join(escapeSpill ? configDirectory : root, (wrongSpillName ? "other-tool" : call.id) + (spillText ? ".txt" : ".json"));
+          const native = nativeSpill || nativeSpillError || wrongNativeMethod;
+          const filename = native ? `mcp-atlassian-${wrongNativeMethod ? "getConfluencePage" : "getJiraIssueTypeMetaWithFields"}-1792990582303.txt` : (wrongSpillName ? "other-tool" : call.id) + (spillText ? ".txt" : ".json");
+          const file = path.join(escapeSpill ? configDirectory : root, filename);
           await writeFile(file, oversizeSpill ? " ".repeat(2000001) : JSON.stringify(content));
-          content = `<persisted-output>\nFull output saved to: ${file}\nPreview omitted`;
+          content = native ? `Error: response exceeds maximum allowed tokens. Output has been saved to ${file}\nPreview omitted` : `<persisted-output>\nFull output saved to: ${file}\nPreview omitted`;
         }
       }
       messages.push(
         { role: "assistant", content: [{ ...call, input }] },
-        { role: "user", content: [{ type: "tool_result", tool_use_id: call.id, content }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: call.id, content, ...(nativeSpillError && call.name.endsWith("getJiraIssueTypeMetaWithFields") ? {is_error:true} : {}) }] },
       );
     }
     throw new Error("Stub exceeded bounded steps");
@@ -232,6 +237,9 @@ test("spilled native MCP output is read only from the owned session; escapes/tru
   for (const [config, expected] of [
     [{ spill: true }, null],
     [{ spillText: true }, null],
+    [{ nativeSpill: true }, null],
+    [{ nativeSpillError: true }, null],
+    [{ wrongNativeMethod: true }, /unexpected tool filename/],
     [{ oversizeSpill: true }, /exceeds the 2 MB/],
     [{ wrongSpillName: true }, /unexpected tool filename/],
     [{ escapeSpill: true }, /outside this preflight/],

@@ -5,7 +5,7 @@ import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { jiraObjects } from "./jira-project.js";
 import { appendixOptions } from "./appendix-markdown.js";
-import { jiraMetadataReads } from "./jira-mcp-policy.js";
+import { jiraMetadataReads, confluenceReads, mcpDecision } from "./jira-mcp-policy.js";
 
 // Claude retains its own OAuth store. A loopback-only deterministic API drives MCP, not a paid model.
 export async function preflightJiraMcp({
@@ -17,6 +17,8 @@ export async function preflightJiraMcp({
   timeoutMs = 60000,
   requireSkillProof = false,
   afterMetadata,
+  readWorkflow,
+  onReadProgress,
   configDirectory = path.join(homedir(), ".claude"),
 }) {
   const evidence = [],
@@ -53,6 +55,26 @@ export async function preflightJiraMcp({
   };
   const next = () => {
     if (!inventory) throw new Error("Atlassian MCP tool inventory unavailable");
+    if (readWorkflow) {
+      if (prepared.mcpGuard.stage !== "confluence")
+        throw new Error("Invalid Confluence read workflow policy");
+      const step = readWorkflow({ evidence, inventory });
+      if (step.result) {
+        result = step.result;
+        return null;
+      }
+      const [method, input] = step.request || [];
+      if (
+        !confluenceReads.includes(method) ||
+        !prepared.mcpTools.includes(full(method)) ||
+        !inventory.some((tool) => tool.name === full(method)) ||
+        !mcpDecision(prepared.mcpGuard, full(method), input)
+      )
+        throw new Error(
+          "Confluence MCP read was denied before dispatch or its tool is unavailable",
+        );
+      return [method, input];
+    }
     for (const method of jiraMetadataReads)
       if (!inventory.some((t) => t.name === full(method)))
         throw new Error(`Required Atlassian read tool unavailable: ${method}`);
@@ -189,23 +211,26 @@ export async function preflightJiraMcp({
     if (afterMetadata) {
       const request = afterMetadata({ result, evidence, inventory });
       if (request) {
-        if (!prepared.mcpTools.includes(full(request[0]))) throw new Error("Publication preflight requested an unapproved read tool");
+        if (!prepared.mcpTools.includes(full(request[0])))
+          throw new Error("Publication preflight requested an unapproved read tool");
         return request;
       }
       result.evidence = evidence;
     }
     return null;
   };
-  const readOutput = async (content, toolId) => {
+  const readOutput = async (content, toolId, method) => {
     const text = typeof content === "string" ? content : JSON.stringify(content);
-    if (!text.includes("<persisted-output>")) return content;
     const rawText = Array.isArray(content)
       ? content
           .filter((c) => c.type === "text")
           .map((c) => c.text)
           .join("\n")
       : content;
-    const file = String(rawText).match(/Full output saved to: ([^\r\n]+)/)?.[1];
+    const file = String(rawText).match(
+      /(?:Full output saved to:|Output has been saved to:?)\s+((?:\/|[A-Za-z]:[\\/])[^\r\n]*?\.(?:json|txt))(?=[\s"'`.)]|$)/,
+    )?.[1];
+    if (!file && !text.includes("<persisted-output>")) return content;
     if (!file || !/^[0-9a-f-]{36}$/.test(sessionId || ""))
       throw new Error("Cannot verify the native MCP output artifact scope");
     const cwd = await realpath(prepared.artifactDirectory);
@@ -218,13 +243,24 @@ export async function preflightJiraMcp({
     );
     const canonicalRoot = await realpath(root),
       target = await realpath(file);
-    if (path.dirname(target) !== canonicalRoot ||
-        ![toolId + ".json", toolId + ".txt"].includes(path.basename(target)))
-      throw new Error("MCP output artifact is outside this preflight's owned session or has an unexpected tool filename");
+    const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const nativeName = new RegExp(
+      `^mcp-${escapeRegex(prepared.mcpGuard.server)}-${escapeRegex(method)}-\\d{10,16}\\.(?:json|txt)$`,
+    );
+    if (
+      path.dirname(target) !== canonicalRoot ||
+      (![toolId + ".json", toolId + ".txt"].includes(path.basename(target)) &&
+        !nativeName.test(path.basename(target)))
+    )
+      throw new Error(
+        "MCP output artifact is outside this preflight's owned session or has an unexpected tool filename",
+      );
     const info = await lstat(target);
     if (!info.isFile()) throw new Error("MCP output artifact is not a regular file");
     if (info.size > 2000000)
-      throw new Error("MCP output artifact exceeds the 2 MB preflight size limit; narrow or paginate the Jira response");
+      throw new Error(
+        "MCP output artifact exceeds the 2 MB preflight size limit; narrow or paginate the MCP response",
+      );
     return JSON.parse(await readFile(target, "utf8"));
   };
   const secretPath = "/" + randomUUID();
@@ -235,9 +271,12 @@ export async function preflightJiraMcp({
         return res.end();
       }
       let raw = "";
+      req.setEncoding("utf8");
       for await (const chunk of req) {
         raw += chunk;
-        if (raw.length > 4000000) throw new Error("Local MCP preflight request exceeds limit");
+        // The CLI resends prior page results. Keep a separate bounded allowance for Confluence.
+        if (raw.length > (readWorkflow ? 24_000_000 : 4_000_000))
+          throw new Error("Local MCP preflight request exceeds limit");
       }
       if (req.url.includes("count_tokens")) return res.end('{"input_tokens":1}');
       if (!req.url.startsWith(secretPath + "/v1/messages")) {
@@ -260,17 +299,21 @@ export async function preflightJiraMcp({
             )
               continue;
             seen.add(block.tool_use_id);
-            if (block.is_error)
-              throw new Error(
-                `Atlassian ${pending.method} failed: ${sanitizeMcpError(block.content)}`,
-              );
+            const content = await readOutput(block.content, pending.id, pending.method);
+            const recovered = content !== block.content;
+            const isError = (block.is_error && !recovered) || content?.isError === true;
+            if (isError && !readWorkflow)
+              throw new Error(`Atlassian ${pending.method} failed: ${sanitizeMcpError(content)}`);
             if (
+              !recovered &&
               /exceeds maximum allowed tokens|Output has been saved to/.test(
-                JSON.stringify(block.content),
+                JSON.stringify(content),
               )
             )
               throw new Error(
-                "Jira MCP metadata response was truncated; narrow the project/field request before retrying. No paid generation started.",
+                readWorkflow
+                  ? `Confluence MCP ${pending.method} response was truncated and no verified full output file is available. No paid generation started.`
+                  : `Jira MCP metadata response was truncated (${pending.method}); narrow the project/field request before retrying. No paid generation started.`,
               );
             if (pending.method === "Skill") {
               skillInvoked = true;
@@ -278,9 +321,10 @@ export async function preflightJiraMcp({
               continue;
             }
             evidence.push({
+              ...(isError ? { isError: true } : {}),
               method: pending.method,
               input: pending.input,
-              content: await readOutput(block.content, pending.id),
+              content,
             });
             pending = undefined;
           }
@@ -290,6 +334,7 @@ export async function preflightJiraMcp({
         const job = next();
         if (job) {
           pending = { id: "preflight_" + requests, method: job[0], input: job[1] };
+          onReadProgress?.(pending.method);
           blocks = [
             {
               type: "tool_use",
@@ -342,12 +387,33 @@ export async function preflightJiraMcp({
         }
       },
     });
-    if (failure) { failure.jiraReadEvidence = evidence; throw failure; }
+    if (failure) {
+      failure.jiraReadEvidence = evidence;
+      throw failure;
+    }
     if (!result)
       throw new Error(
         "MCP preflight did not verify actual tools and Jira metadata; paid generation was not started",
       );
     return result;
+  } catch (error) {
+    if (
+      readWorkflow &&
+      /timed out|ETIMEDOUT/i.test(error.message) &&
+      !/needs.auth|unauthori[sz]ed|permission|\b40[13]\b/i.test(error.message)
+    ) {
+      const step =
+        pending?.method ||
+        (result ? "finishing the import" : evidence.at(-1)?.method) ||
+        "connecting to Atlassian MCP";
+      const timeout = new Error(
+        `Confluence MCP timed out during ${step}. No project was created and no paid generation started.`,
+        { cause: error },
+      );
+      timeout.code = "MCP_READ_TIMEOUT";
+      throw timeout;
+    }
+    throw error;
   } finally {
     api.closeAllConnections();
     await new Promise((resolve) => api.close(resolve));

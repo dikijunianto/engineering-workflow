@@ -1911,3 +1911,31 @@ test("Agents React route reuses typed readiness, interruption and existing detai
   assert.throws(()=>actions.terminateRun(run.id),/no longer running/);
   assert.equal(app.requests.filter(request=>request.type==="CREATE_QUEST"||request.type==="EXECUTE_QUEST").length,0);
 });
+
+
+test("Jira project filter intersects text search and preserves selection on refresh", async () => {
+  const data = uiFixture();
+  data.quests.push({...data.quests[0], id:'second-project', title:'Second project'});
+  data.tasks.push({...data.tasks[0], id:'other-task',questId:'second-project',title:'Other task'});
+  const app = await frontend(data);
+  app.location.hash = '#jira';
+  app.ui.render();
+  assert.match(app.html(), /data-jira-project/);
+  assert.match(app.html(), /Second project/);
+  const rows = [
+    {dataset:{project:data.quests[0].id},textContent:'First project PAY-501',hidden:false},
+    {dataset:{project:'second-project'},textContent:'Second project PAY-501',hidden:false},
+    {dataset:{project:'second-project'},textContent:'Second project PAY-502',hidden:false},
+  ];
+  const original = app.document.querySelectorAll;
+  app.document.querySelectorAll = selector => selector === '[data-jira-row]' ? rows : original(selector);
+  await app.listeners.change({target:{value:'second-project',matches:selector=>selector==='[data-jira-project]'}});
+  assert.deepEqual(rows.map(r=>r.hidden), [true,false,false]);
+  await app.listeners.input({target:{value:'PAY-501',matches:selector=>selector==='[data-jira-filter]'}});
+  assert.deepEqual(rows.map(r=>r.hidden), [true,false,true]);
+  assert.equal(app.element('[data-jira-count]').textContent, '1 of 3 execution tasks');
+  app.ui.render();
+  assert.match(app.html(), /value="second-project" selected/);
+  assert.match(app.html(), /value="PAY-501"/);
+  assert.equal(app.requests.length, 0);
+});

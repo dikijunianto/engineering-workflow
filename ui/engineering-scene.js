@@ -31,10 +31,10 @@ export function cameraFrame(bounds, aspect, yaw = 0.38, pitch = 0.78, zoom = 1) 
               Math.abs(v.dot(right)) / (tan * Math.max(aspect, 0.2)),
               Math.abs(v.dot(up)) / tan,
             ) *
-              1.32,
+              (1.18 / zoom),
         );
       }
-  return { center, position: center.clone().addScaledVector(direction, distance / zoom) };
+  return { center, position: center.clone().addScaledVector(direction, distance) };
 }
 export const HANDOFF_LABELS = {
   intake: ["Specification received", "Bind selected repositories", "Scope ready"],
@@ -305,6 +305,7 @@ export function createEngineeringScene(canvas, labels, onSelect, onFail, onPhase
   const target = new T.Vector3(),
     wanted = new T.Vector3(),
     desired = new T.Vector3();
+  const stageViews = [[0.38, 0.78], [0.24, 0.68], [0.18, 0.72], [0.35, 0.72], [0.18, 0.68], [0.12, 0.72], [0.28, 0.68]];
   function bounds() {
     const b = new T.Box3().setFromObject(selected ? stations[selected - 1] : world);
     if (selected === 5) b.union(new T.Box3().setFromObject(stations[5]));
@@ -385,6 +386,7 @@ export function createEngineeringScene(canvas, labels, onSelect, onFail, onPhase
       const v = new T.Vector3(STATIONS[i].x, 3.5, STATIONS[i].z).project(camera);
       const visible = (!selected || selected === i + 1 || (selected === 5 && i === 5)) && v.z < 1;
       el.hidden = !visible;
+      el.setAttribute("aria-pressed", String(selected === i + 1));
       el.style.left = `${Math.max(80, Math.min(canvas.clientWidth - 80, ((v.x + 1) / 2) * canvas.clientWidth))}px`;
       el.style.top = `${Math.max(32, Math.min(canvas.clientHeight - 80, ((-v.y + 1) / 2) * canvas.clientHeight))}px`;
     });
@@ -416,8 +418,7 @@ export function createEngineeringScene(canvas, labels, onSelect, onFail, onPhase
   canvas.addEventListener("webglcontextlost", lost);
   function control(action, a = 0, b = 0) {
     if (action === "reset") {
-      yaw = 0.38;
-      pitch = 0.78;
+      [yaw, pitch] = stageViews[selected] || stageViews[0];
       zoom = 1;
     }
     if (action === "orbit") {
@@ -463,8 +464,7 @@ export function createEngineeringScene(canvas, labels, onSelect, onFail, onPhase
       stations.forEach(
         (g, i) => (g.visible = !selected || i === selected - 1 || (selected === 5 && i === 5)),
       );
-      yaw = 0.38;
-      pitch = 0.78;
+      [yaw, pitch] = stageViews[selected] || stageViews[0];
       zoom = 1;
       frameTarget();
     },

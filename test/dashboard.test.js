@@ -10,7 +10,7 @@ import { uiFixture } from "./ui-fixture.js";
 
 const bundle = await build({
   stdin: {
-    contents: `export { bindSceneWheel } from './ui/engineering-viewport.jsx'; import React from 'react'; import { renderToStaticMarkup } from 'react-dom/server'; import { Overview } from './ui/dashboard.jsx'; import { Sidebar } from './ui/sidebar.jsx'; import { Agents } from './ui/agents.jsx'; import { ProjectDetail } from './ui/project-detail.jsx'; import { ONBOARDING_STAGES, Onboarding3DCanvas } from './ui/onboarding-3d.jsx'; export { ONBOARDING_STAGES }; export const renderOnboardingCanvas = (stageIndex=0) => renderToStaticMarkup(React.createElement(Onboarding3DCanvas,{stageIndex,onSelectStage(){},autoPlay:true,progressRatio:0.5,cameraPreset:'orbit',zoomDelta:0,workspaceCounts:{quests:1,repos:2,agents:1}})); export const renderAgents = state => renderToStaticMarkup(React.createElement(Agents,{state,actions:{}})); export const renderProjectDetail = (state, props = {}) => renderToStaticMarkup(React.createElement(ProjectDetail, { state, actions: {}, questId: state.quests?.[0]?.id || 'quest-ui-fixture', tab: 'overview', ...props })); import { CreateProjectForm, permittedModels, inheritedJira } from './ui/create-project.jsx'; export { permittedModels, inheritedJira }; export const renderProjectForm = state => renderToStaticMarkup(React.createElement(CreateProjectForm,{state,jiraDefault:'FCAD',busy:false,setBusy(){},onCreate(){},onClose(){}})); export const renderSidebar = (state,props={}) => renderToStaticMarkup(React.createElement(Sidebar,{state,...props})); export const render = state => renderToStaticMarkup(React.createElement(Overview,{state,actions:{}}));`,
+    contents: `export { readableDocument, briefExcerpt } from './ui/project-detail.jsx'; export { bindSceneWheel } from './ui/engineering-viewport.jsx'; import React from 'react'; import { renderToStaticMarkup } from 'react-dom/server'; import { Overview } from './ui/dashboard.jsx'; import { Sidebar } from './ui/sidebar.jsx'; import { Agents } from './ui/agents.jsx'; import { ProjectDetail } from './ui/project-detail.jsx'; import { ONBOARDING_STAGES, Onboarding3DCanvas } from './ui/onboarding-3d.jsx'; export { ONBOARDING_STAGES }; export const renderOnboardingCanvas = (stageIndex=0) => renderToStaticMarkup(React.createElement(Onboarding3DCanvas,{stageIndex,onSelectStage(){},autoPlay:true,progressRatio:0.5,cameraPreset:'orbit',zoomDelta:0,workspaceCounts:{quests:1,repos:2,agents:1}})); export const renderAgents = state => renderToStaticMarkup(React.createElement(Agents,{state,actions:{}})); export const renderProjectDetail = (state, props = {}) => renderToStaticMarkup(React.createElement(ProjectDetail, { state, actions: {}, questId: state.quests?.[0]?.id || 'quest-ui-fixture', tab: 'overview', ...props })); import { CreateProjectForm, permittedModels, inheritedJira } from './ui/create-project.jsx'; export { permittedModels, inheritedJira }; export const renderProjectForm = state => renderToStaticMarkup(React.createElement(CreateProjectForm,{state,jiraDefault:'FCAD',busy:false,setBusy(){},onCreate(){},onClose(){}})); export const renderSidebar = (state,props={}) => renderToStaticMarkup(React.createElement(Sidebar,{state,...props})); export const render = state => renderToStaticMarkup(React.createElement(Overview,{state,actions:{}}));`,
     resolveDir: process.cwd(),
     loader: "jsx",
   },
@@ -25,6 +25,8 @@ const file = path.join(temp, "render.cjs");
 writeFileSync(file, bundle.outputFiles[0].text);
 const {
   render,
+  readableDocument,
+  briefExcerpt,
   renderSidebar,
   renderProjectForm,
   permittedModels,
@@ -48,7 +50,7 @@ test("dashboard cards use actual data and all/active/archived filters preserve s
   assert.equal(dashboardData(state).projects.length, 2);
   assert.equal(dashboardData(state, "active").projects.length, 1);
   assert.equal(dashboardData(state, "archived").projects[0].id, "deleted");
-  assert.equal(projectStatus(state.quests[1]), "Completed");
+  assert.equal(projectStatus(state.quests[1]), "PRs created · merge unverified");
   assert.equal(projectStatus(state.deletedQuests[0]), "Archived");
   assert.equal(JSON.stringify(state), before);
 });
@@ -71,9 +73,9 @@ test("empty dashboard has creation action, accessible tabs and no invented proje
   assert.match(html, /Create First Project/);
   assert.match(html, /border-dashed/);
   assert.match(html, /role="tablist"/);
-  assert.match(html, /Recent Activity Log/);
+  assert.match(html, /Recent history/);
   assert.match(html, /Quick Actions/);
-  assert.match(html, /Trend unavailable/);
+  assert.doesNotMatch(html, /Trend unavailable/);
   assert.match(html, /Show.*sample project preview/);
   assert.doesNotMatch(html, /Payment API improvements|\+0%/);
 });
@@ -82,7 +84,7 @@ test("populated dashboard displays repositories, active agents, status and actua
   assert.match(html, /payment-service/);
   assert.match(html, /In Progress/);
   assert.match(html, /active agents/);
-  assert.match(html, /diff n\/a/);
+  assert.doesNotMatch(html, /diff n\/a/);
   assert.doesNotMatch(html, /Create First Project/);
 });
 
@@ -212,10 +214,9 @@ test("3D onboarding stages explain app purpose, workflow mechanics and governanc
   const overviewHtml = render(state);
   const sidebarHtml = renderSidebar(state);
   const canvasHtml = renderOnboardingCanvas(0);
-  assert.match(overviewHtml, /How DevQuest Works · 3D Tour/);
-  assert.match(overviewHtml, /Explore How DevQuest Works in 3D/);
-  assert.match(overviewHtml, /Launch 3D Tour/);
-  assert.match(sidebarHtml, /3D Workflow Guide/);
+  assert.doesNotMatch(overviewHtml, /Launch 3D Tour|How DevQuest Works · 3D Tour/);
+  assert.deepEqual(ONBOARDING_STAGES.slice(1).map(s => s.workflowPhase), ["Define", "Define", "Plan", "Plan", "Build", "Review → Handoff"]);
+  assert.doesNotMatch(sidebarHtml, /3D Workflow Guide/);
   assert.match(canvasHtml, /<canvas[^>]*class="dq-onboarding-canvas/);
   assert.equal(ONBOARDING_STAGES.length, 7);
   for (const stage of ONBOARDING_STAGES) {
@@ -272,7 +273,7 @@ test("ProjectDetail renders compact sticky header, horizontal stepper and 65/35 
   assert.match(html, /Sprint 71/);
   assert.match(html, /Back to Projects/);
   // Row 2: Horizontal compact stepper & primary CTA
-  for (const step of ["Define", "Plan", "Build", "Review", "Done"]) {
+  for (const step of ["Define", "Plan", "Build", "Review", "Handoff"]) {
     assert.ok(html.includes(step), step);
   }
   assert.match(html, /\+ Start Brainstorm/);
@@ -282,14 +283,14 @@ test("ProjectDetail renders compact sticky header, horizontal stepper and 65/35 
   }
   // 2-Column Overview cards
   assert.match(html, /Next Action/);
-  assert.match(html, /Project Brief/);
+  assert.match(html, /Project scope/);
   assert.match(html, /Linked Repositories/);
   assert.match(html, /Recent Agent Activity/);
   assert.match(html, /personal-finance-svc/);
   assert.match(html, /funding-transaction-svc/);
   assert.match(html, /development/);
   assert.match(html, /master/);
-  assert.doesNotMatch(html, /<details/);
+  assert.doesNotMatch(html, /<details open/);
 });
 
 test("ProjectDetail Documents tab renders 25/75 file tree nav and Markdown viewport without accordions", () => {
@@ -322,7 +323,7 @@ test("ProjectDetail Documents tab renders 25/75 file tree nav and Markdown viewp
   assert.match(html, /Copy/);
   assert.match(html, /Download/);
   assert.match(html, /Edit/);
-  assert.doesNotMatch(html, /<details/);
+  assert.doesNotMatch(html, /<details open/);
 });
 
 test("ProjectDetail Work tab renders 4-column task pipeline with agent roles, git branches and test status pills", () => {
@@ -337,17 +338,17 @@ test("ProjectDetail Work tab renders 4-column task pipeline with agent roles, gi
   assert.match(html, /Developer/);
   assert.match(html, /devquest\/recurring-payment/);
   assert.match(html, /node-test: PASS/);
-  assert.doesNotMatch(html, /<details/);
+  assert.doesNotMatch(html, /<details open/);
 });
 
 test("ProjectDetail Room tab renders live execution log, bottom input bar and preset agent triggers", () => {
   const state = uiFixture();
   const html = renderProjectDetail(state, { tab: "room" });
-  assert.match(html, /Agent Room · Live Execution &amp; Decision Stream/);
+  assert.match(html, /Agent Room · Runs &amp; decisions/);
   assert.match(html, /Send Note \/ Instruction to Agent/);
   assert.match(html, /@Architect analyze impact/);
   assert.match(html, /@Developer write tests/);
-  assert.doesNotMatch(html, /<details/);
+  assert.doesNotMatch(html, /<details open/);
 });
 
 test("scene wheel captures focused zoom, preserves page scrolling and browser zoom, and cleans up", () => {
@@ -431,4 +432,63 @@ test('PR cards surface saved publication errors and show approvals and running p
  html=renderProjectDetail(state,{tab:'work'});
  assert.match(html,/Creating pull request/);
  assert.doesNotMatch(html,/GitHub provider cannot create a Bitbucket PR/);
+});
+
+test("completed board adapts without inferring validation or external merge", () => {
+  const state = uiFixture();
+  state.runs = [];
+  state.quests[0].state = "PRS_CREATED";
+  for (const task of state.tasks) { task.state = "COMPLETED"; delete task.validation; }
+  const before = JSON.stringify(state);
+  const html = renderProjectDetail(state, {tab:"work"});
+  assert.match(html, /Completed tasks/);
+  assert.match(html, /dq-completed-board/);
+  assert.doesNotMatch(html, /No tasks in|tests: PASS|node-test: PASS/);
+  assert.match(html, /PR review and merge are separate/);
+  assert.match(html, /href="https:\/\/example.test\/PAY-501"/);
+  assert.equal(JSON.stringify(state), before);
+  state.tasks[0].state = "RUNNING";
+  assert.match(renderProjectDetail(state,{tab:"work"}), /xl:grid-cols-4/);
+  state.tasks = [];
+  assert.doesNotMatch(renderProjectDetail(state,{tab:"work"}), /All 0 implementation/);
+});
+
+test("new project has zero selected repository permissions", () => {
+  const html = renderProjectForm(uiFixture());
+  const inputs = html.match(/<input[^>]*name="repositoryIds"[^>]*>/g);
+  assert.equal(inputs.length, 2);
+  assert.ok(inputs.every(input => !/checked/.test(input)));
+  assert.match(html, /No repository access selected/);
+});
+
+test("document location is collapsed, artifact remains original and readable", () => {
+  const state = uiFixture();
+  state.artifacts.find(a => a.kind === "trd").file = "/private/project/trd.md";
+  const html = renderProjectDetail(state,{tab:"documents",focusDocument:"trd"});
+  assert.match(html, /<details[^>]*><summary[^>]*>Local file details/);
+  assert.match(html, /dq-readable-document/);
+  assert.match(html, /Raw Source/);
+  assert.match(html, /Download/);
+});
+
+
+test("document reader builds safe section navigation and retains structured Markdown", () => {
+  const doc = readableDocument('# Title\n\n## Same title\n\n1. First\n2. Second\n\n## Same title\n\n<script>alert(1)</script>\n\n[unsafe](javascript:alert(1))');
+  assert.equal(new Set(doc.headings.map(h => h.id)).size, 3);
+  assert.match(doc.html, /<ol>/);
+  assert.match(doc.html, /id="document-section-2" tabindex="-1"/);
+  assert.match(doc.html, /&lt;script&gt;/);
+  assert.doesNotMatch(doc.html, /<script>|href="javascript:/);
+  const state = uiFixture();
+  state.artifacts = [{id:'readable', questId:state.quests[0].id,kind:'trd',content:'# Title\n\n## Goal\n\nPreserve PIN behavior.',revision:1}];
+  const html = renderProjectDetail(state, {tab:'documents', focusDocument:'trd'});
+  assert.match(html, /aria-label="Document sections"/);
+  assert.match(html, /dq-document-layout/);
+  assert.doesNotMatch(html, /max-h-\[70vh\]/);
+});
+
+test("project scope excerpt uses the saved goal instead of metadata or a full document", () => {
+  const excerpt = briefExcerpt('# Specification\n\nQuest: example\n\n## 1. Goal\n\nPreserve **PIN behavior**.\n\n## Details\n\nLong implementation notes.');
+  assert.match(excerpt, /Preserve <strong>PIN behavior/);
+  assert.doesNotMatch(excerpt, /Quest:|Long implementation/);
 });
