@@ -68,22 +68,26 @@ DevQuest sends one JSON document on standard input. `operation` is `generate-app
 
 ## Confluence
 
-Configure one HTTPS origin plus either environment-variable names or an existing local authentication provider:
+Use the existing authenticated Atlassian MCP connection in Claude Code:
 
 ```json
 {
   "confluence": {
+    "provider": "atlassian-mcp",
     "host": "https://acme.atlassian.net",
-    "emailEnv": "DEVQUEST_CONFLUENCE_EMAIL",
-    "tokenEnv": "DEVQUEST_CONFLUENCE_TOKEN",
+    "mcpServer": "atlassian",
     "maxPages": 10,
     "maxBodyBytes": 1000000,
-    "timeoutMs": 15000
+    "timeoutMs": 120000
   }
 }
 ```
 
-Credentials are read at request time and are not persisted. Imports use the Confluence Cloud REST v2 page endpoint with storage bodies. Only the selected page and direct same-origin page links in that main body are fetched. Supporting pages are not crawled, external links are ignored, response bodies/page counts are capped, and redirects outside the configured origin are rejected. A main-page failure aborts the import; supporting-page failures become warnings.
+The host must be one HTTPS site origin. DevQuest loads only the selected server from `~/.claude.json` (override with `confluence.mcpConfigPath`, or inherit `workflow.jiraMcpConfig`). Claude retains its own OAuth store. A deterministic loopback API drives the MCP reads; no paid model generation or skill runs. First, authenticated resource discovery confirms the configured tenant. A second session is restricted to that verified cloud ID. The app-owned pre-dispatch hook permits only resource discovery, Confluence page reads, bounded exact-title searches, and a bounded descendant search scoped to the selected root; unknown tools and all writes are denied. Markdown is preferred when the live tool schema supports it, reducing HTML overhead while preserving source text. HTML/storage remains a compatibility fallback. Markdown and HTML page links remain restricted to the configured site. Temporary connection files are private and removed after import. `timeoutMs` bounds the whole import, including discovery and page reads. A timed-out read may reconnect once within that same budget; authentication/permission failures are not retried. Errors identify the stalled tool or connection phase. Settings → Integrations → Confluence shows the configured site and provider; configuration changes require a restart.
+
+MCP import follows nested same-origin page links and checks descendants when the live search schema supports the scoped CQL query. The limit is 10 pages, including the root, with up to 1 MB per page response. Imports retain source IDs, titles, and versions. Skipped pages, external sites, and incomplete descendant discovery are reported for review. Main-page, tenant, or transport verification failures stop creation. Verified linked-page read failures become warnings.
+
+The Create Project dialog shows import progress. Retrying the same URL in the open dialog can reuse completed page reads for 15 minutes in the same DevQuest process. The saved PRD retains all imported text. When it exceeds 100,000 characters, the agent receives an excerpt and analysis requires explicit confirmation of incomplete context. Native full-output files are recovered only from the active session’s owned tool-results directory, with matching tool names and a 2 MB file cap. The REST importer remains available with `provider: "rest"` (or no provider), `host`, `emailEnv`, and `tokenEnv`. MCP mode uses the existing OAuth connection.
 
 ## GitHub
 

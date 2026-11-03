@@ -432,7 +432,10 @@ export class Engine {
         this.adapters.config?.skill?.bridge ||
         this.adapters.config?.workflow?.skills?.upload,
       ),
-      confluenceConfigured: Boolean(this.adapters.config?.confluence),
+      confluenceConfigured: Boolean(this.adapters.config?.confluence?.host),
+      confluenceProvider: this.adapters.config?.confluence?.provider || "rest",
+      confluenceHost: this.adapters.config?.confluence?.host || "",
+      confluenceMcpServer: this.adapters.config?.confluence?.mcpServer || this.adapters.config?.workflow?.jiraMcpServer || "atlassian",
       provider: this.adapters.config?.sourceControl?.provider === "bitbucket-mcp" ? "Bitbucket MCP" : "Automatic by repository remote",
       reviewers: this.adapters.config?.sourceControl?.reviewers || [],
       chatConfigured: Boolean(process.env[this.adapters.config?.googleChat?.webhookEnv]),
@@ -467,12 +470,50 @@ export class Engine {
       requireValue(!this.stopping, "Application is shutting down");
       return this.previewRepository(type, input);
     }
+    if (type === "CREATE_QUEST" && input.kind === "PRODUCT" && input.sourceType === "confluence")
+      return this.importConfluence(input);
     return this.exclusive(async () => {
       requireValue(!this.stopping, "Application is shutting down");
       const result = await this.dispatch(type, input);
       this.emit({ type: "changed" });
       return result;
     });
+  }
+  selectedQuestRepositories(ids) {
+    requireValue(Array.isArray(ids) && ids.length > 0, "Register and select at least one repository");
+    ids.forEach((key) => this.get("repositories", key));
+    return ids;
+  }
+  async importConfluence(input) {
+    requireValue(!this.stopping, "Application is shutting down");
+    this.selectedQuestRepositories(input.repositoryIds);
+    text(input.title, "Title", 160);
+    requireValue(!this.confluenceImportActive, "A Confluence import is already running");
+    const importId = typeof input.importId === "string" && /^[a-f0-9-]{36}$/.test(input.importId)
+      ? input.importId : undefined;
+    const url = text(input.url, "Confluence URL", 2048);
+    const existing = importId && this.store.all("quests").find((quest) => quest.source?.importId === importId);
+    if (existing) {
+      requireValue(existing.source.reference === url && !existing.deletedAt, "Confluence import already saved under another project");
+      return existing;
+    }
+    this.confluenceImportActive = true;
+    try {
+      const imported = await this.adapters.confluence.fetch(url, {
+        importId,
+        onProgress: (message) => {
+          if (importId) this.emit({ type: "confluence-progress", importId, message });
+        },
+      });
+      return await this.exclusive(async () => {
+        requireValue(!this.stopping, "Application is shutting down");
+        const quest = await this.dispatch("CREATE_QUEST", { ...input, url, importId }, false, imported);
+        this.emit({ type: "changed" });
+        return quest;
+      });
+    } finally {
+      this.confluenceImportActive = false;
+    }
   }
   repositoryActivity(repositoryId) {
     const quests = this.store
@@ -570,7 +611,7 @@ export class Engine {
     this.log(quest.id, "Project moved to Deleted projects. Local work, documents and external issues are preserved.");
     return { deleted: true, questId: quest.id };
   }
-  async dispatch(type, p, coordinated = false) {
+  async dispatch(type, p, coordinated = false, importedConfluence) {
     const s = this.store;
     if (["DELETE_QUEST", "RESTORE_QUEST"].includes(type)) return this.projectCleanup(type, p);
     const referencedQuests = [
@@ -667,60 +708,56 @@ export class Engine {
         "Existing QA issue requires a valid Jira key and a Tech Quest",
       );
       const title = text(p.title, "Title", 160);
-      const repositories = p.repositoryIds?.length
-        ? p.repositoryIds
-        : s.all("repositories").map((r) => r.id);
-      requireValue(
-        Array.isArray(repositories) && repositories.length > 0,
-        "Register and select at least one repository",
-      );
-      repositories.forEach((key) => this.get("repositories", key));
-      let content = p.content,
-        sources = [],
-        warnings = [];
-      if (p.kind === "PRODUCT" && p.sourceType === "confluence")
-        ({ content, sources, warnings } = await this.adapters.confluence.fetch(
-          text(p.url, "Confluence URL", 2048),
-        ));
-      content = text(content, "Requirement or technical idea");
+      const repositories = this.selectedQuestRepositories(p.repositoryIds);
+      const isConfluence = p.kind === "PRODUCT" && p.sourceType === "confluence";
+      if (isConfluence) requireValue(importedConfluence, "Import the Confluence source before saving");
+      const { sources = [], warnings: importWarnings = [] } = importedConfluence || {};
+      const content = text(importedConfluence?.content ?? p.content, "Requirement or technical idea", isConfluence ? 10_010_000 : 100_000);
+      const warnings = content.length > 100_000
+        ? [...importWarnings, "The full imported PRD is saved locally. Agent context includes only the first 100,000 characters. Review the document before continuing."]
+        : importWarnings;
       const jira = this.jiraSettings.resolve(p.jira || {}, repositories);
-      const quest = s.put("quests", {
-        id: id(),
-        title,
-        kind: p.kind,
-        ...(p.existingJiraKey ? { existingJiraKey: p.existingJiraKey } : {}),
-        state: "INTAKE_READY",
-        repositoryIds: [...new Set(repositories)],
-        sources,
-        source: {
-          type: p.sourceType || (p.kind === "TECH" ? "idea" : "text"),
-          reference: p.file?.name || (p.sourceType === "confluence" ? p.url : "Local text"),
-          importedAt: now(),
-        },
-        warnings,
-        sprint: String(p.sprint || "").slice(0, 80),
-        autoExecute: false,
-        ...(p.agentProfiles?.enabled === true
-          ? {
-              agentProfiles: {
-                enabled: true,
-                schemaVersion: 1,
-                pins: this.agentContexts.registry.pins(),
-              },
-            }
-          : {}),
-        ...jira,
-        ...(p.workflowVersion === 2
-          ? {
-              workflowVersion: 2,
-              execution: this.v11.config(p.execution),
-              ...epicInput(p.epic),
-              reviewers: p.reviewers?.length ? p.reviewers : undefined,
-            }
-          : {}),
-        createdAt: now(),
+      const quest = s.transaction(() => {
+        const record = s.put("quests", {
+          id: id(),
+          title,
+          kind: p.kind,
+          ...(p.existingJiraKey ? { existingJiraKey: p.existingJiraKey } : {}),
+          state: "INTAKE_READY",
+          repositoryIds: [...new Set(repositories)],
+          sources,
+          source: {
+            type: p.sourceType || (p.kind === "TECH" ? "idea" : "text"),
+            reference: p.file?.name || (p.sourceType === "confluence" ? p.url : "Local text"),
+            importedAt: now(),
+            ...(isConfluence && p.importId ? { importId: p.importId } : {}),
+          },
+          warnings,
+          sprint: String(p.sprint || "").slice(0, 80),
+          autoExecute: false,
+          ...(p.agentProfiles?.enabled === true
+            ? {
+                agentProfiles: {
+                  enabled: true,
+                  schemaVersion: 1,
+                  pins: this.agentContexts.registry.pins(),
+                },
+              }
+            : {}),
+          ...jira,
+          ...(p.workflowVersion === 2
+            ? {
+                workflowVersion: 2,
+                execution: this.v11.config(p.execution),
+                ...epicInput(p.epic),
+                reviewers: p.reviewers?.length ? p.reviewers : undefined,
+              }
+            : {}),
+          createdAt: now(),
+        });
+        s.artifact(record.id, p.kind === "PRODUCT" ? "prd" : "idea", content);
+        return record;
       });
-      s.artifact(quest.id, p.kind === "PRODUCT" ? "prd" : "idea", content);
       this.log(quest.id, `${p.kind === "PRODUCT" ? "Product" : "Tech"} Quest created`);
       return quest;
     }
@@ -1828,7 +1865,11 @@ export class Engine {
             this.store.latest(quest.id, "spec")?.trdArtifactId ===
               this.store.latest(quest.id, "trd")?.id),
       )
-      .map((kind) => `${kind.toUpperCase()}\n${this.artifact(quest.id, kind)}`)
+      .map((kind) => {
+        const content = this.artifact(quest.id, kind);
+        return `${kind.toUpperCase()}\n${kind === "prd" && content.length > 100_000
+          ? content.slice(0, 100_000) + "\n[PRD excerpt. Review the complete saved PRD for omitted requirements.]" : content}`;
+      })
       .join("\n\n");
     return `Quest: ${quest.title}\nRegistered repositories: ${JSON.stringify(quest.repositoryIds.map((key) => {
       const repo = this.get("repositories", key), baseline = ["analysis","trd","plan","spec"].includes(stage) && quest.analysisBaselines?.find(b => b.repoId === key);
@@ -2370,7 +2411,10 @@ export class Engine {
       ...(error.accessFailure ? { accessFailure: error.accessFailure } : {}),
       ...(error.usage ? { usage: error.usage, actualModel: error.actualModel || null } : {}),
     });
-    if (run.taskId) this.put("tasks", this.get("tasks", run.taskId), { state: "FAILED" });
+    if (run.taskId) this.put("tasks", this.get("tasks", run.taskId), {
+      state: "FAILED",
+      error: String(error.message).slice(-4000),
+    });
     if (run.workflowVersion === 2 && run.workId)
       this.put("works", this.get("works", run.workId), {
         state: "NEEDS_HUMAN_ATTENTION",
@@ -2653,6 +2697,7 @@ export class Engine {
   async close() {
     this.stopping = true;
     this.adapters.skill?.close?.();
+    this.adapters.confluence?.close?.();
     await this.exclusive(async () => {
       for (const run of this.store.all("runs"))
         if (run.state === "RUNNING") {

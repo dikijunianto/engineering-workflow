@@ -1,3 +1,4 @@
+import { currentAttentionRuns } from "./model";
 export { openCreateProject } from "./create-project";
 export { openOnboarding3D, Onboarding3DModal, ONBOARDING_STAGES } from "./onboarding-3d";
 export { ProjectDetail } from "./project-detail";
@@ -52,7 +53,6 @@ import {
   Onboarding3DModal,
   openOnboarding3D,
   shouldAutoOpenOnboarding,
-  ONBOARDING_STAGES,
 } from "./onboarding-3d";
 
 const date = (value) =>
@@ -71,20 +71,14 @@ function StatCard({ label, value, icon: Icon, href }) {
   return (
     <a href={href} className="dq-stat-link group">
       <Card className="border-border/50 bg-card transition-colors hover:border-zinc-600">
-        <CardContent className="p-5 sm:p-6">
+        <CardContent className="p-4">
           <div className="flex items-center justify-between">
             <span className="text-sm text-muted-foreground">{label}</span>
             <Icon className="size-4 text-muted-foreground group-hover:text-foreground" />
           </div>
-          <div className="mt-4 flex flex-wrap items-end justify-between gap-3">
-            <strong className="text-4xl font-semibold tracking-tight">{value}</strong>
-            <Badge
-              variant="outline"
-              className="font-normal text-muted-foreground"
-              title="Weekly historical metrics are not recorded"
-            >
-              Trend unavailable
-            </Badge>
+          <div className="mt-2 flex flex-wrap items-end justify-between gap-3">
+            <strong className="text-2xl font-semibold tracking-tight">{value}</strong>
+
           </div>
         </CardContent>
       </Card>
@@ -145,6 +139,7 @@ function ProjectCard({ project, state, sample = false }) {
               ? "just now · sample"
               : date(project.updatedAt || project.createdAt)}
         </span>
+        {!sample && <span className="basis-full text-emerald-300">{project.state === "PRS_CREATED" ? "Next: open PR links for team review and merge" : (state.questRooms?.[project.id]?.blockers?.length ? `${state.questRooms[project.id].blockers.length} blockers · open project to resolve` : "Open project for the next workflow action")}</span>}
         {!sample && <ArrowUpRight className="ml-auto size-4" />}
       </div>
     </>
@@ -163,8 +158,8 @@ function ProjectCard({ project, state, sample = false }) {
 export function Overview({ state, actions }) {
   const [filter, setFilter] = useState("all");
   const [preview, setPreview] = useState(false);
+  const [allActivity, setAllActivity] = useState(false);
   const [onboardingOpen, setOnboardingOpen] = useState(false);
-  const [onboardingStage, setOnboardingStage] = useState(0);
   useEffect(() => {
     if (
       shouldAutoOpenOnboarding() &&
@@ -174,10 +169,6 @@ export function Overview({ state, actions }) {
       setOnboardingOpen(true);
     }
   }, []);
-  const launchOnboarding = (stageIdx = 0) => {
-    setOnboardingStage(stageIdx);
-    setOnboardingOpen(true);
-  };
   const data = dashboardData(state, filter);
   const events = [...state.events]
     .sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0))
@@ -195,14 +186,7 @@ export function Overview({ state, actions }) {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
-          <Button
-            variant="outline"
-            onClick={() => launchOnboarding(0)}
-            className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200"
-          >
-            <Box />
-            How DevQuest Works · 3D Tour
-          </Button>
+
           <Button onClick={actions.newProject}>
             <Plus />
             New Project
@@ -219,57 +203,13 @@ export function Overview({ state, actions }) {
           href="#repositories"
         />
       </section>
-      <Card className="border-emerald-500/25 bg-card/90">
-        <CardContent className="flex flex-col justify-between gap-4 p-5 sm:flex-row sm:items-center sm:p-6">
-          <div className="space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <Badge
-                variant="outline"
-                className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
-              >
-                Interactive 3D Onboarding
-              </Badge>
-              <span className="text-xs text-muted-foreground">
-                5-Stage Gated AI Engineering Pipeline
-              </span>
-            </div>
-            <h2 className="text-base font-semibold tracking-tight">
-              Explore How DevQuest Works in 3D
-            </h2>
-            <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-              Inspect how requirements flow through AI Architecture &amp; TRD approvals, weighted Jira publishing, 5 concurrent isolated Git worktrees, and independent production review before PR creation.
-            </p>
-            <div className="flex flex-wrap items-center gap-1.5 pt-1">
-              {ONBOARDING_STAGES.slice(1).map((stg, idx) => (
-                <button
-                  key={stg.id}
-                  type="button"
-                  onClick={() => launchOnboarding(idx + 1)}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900/90 px-2.5 py-1 text-xs font-medium text-zinc-300 transition-colors hover:border-emerald-500/40 hover:text-emerald-300"
-                >
-                  <span className="font-mono text-[10px] text-emerald-400">{stg.stepNumber}</span>
-                  <span>{stg.shortTitle.replace(/^\d+\.\s*/, "")}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              onClick={() => launchOnboarding(0)}
-              className="bg-emerald-400 font-semibold text-zinc-950 hover:bg-emerald-300"
-            >
-              <Play className="size-4" />
-              Launch 3D Tour
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.85fr)_minmax(0,1fr)]">
         <Card className="min-w-0 border-border/50 bg-card">
           <Tabs value={filter} onValueChange={setFilter}>
             <CardHeader className="gap-5 border-b border-border/60 pb-4">
               <div className="flex items-center justify-between gap-3">
-                <CardTitle className="text-base">Active Projects</CardTitle>
+                <CardTitle className="text-base">Projects</CardTitle>
                 <Button
                   variant="link"
                   size="sm"
@@ -357,27 +297,22 @@ export function Overview({ state, actions }) {
             <CardHeader className="border-b border-border/60 pb-4">
               <CardTitle className="flex items-center gap-2 text-base">
                 <Activity className="size-4 text-muted-foreground" />
-                Recent Activity Log
+                Recent history
               </CardTitle>
             </CardHeader>
             <CardContent className="p-5 sm:p-6">
               {events.length ? (
                 <ol className="dq-timeline space-y-6">
-                  {events.map((event, index) => (
+                  {(allActivity ? events : events.slice(0, 3)).map((event, index) => (
                     <li key={event.id || index} className="relative flex gap-3">
                       <span className="relative z-10 flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-card">
                         <Activity className="size-3.5 text-muted-foreground" />
                       </span>
                       <div className="min-w-0 pt-0.5">
-                        <p className="break-words text-sm leading-5">{event.message}</p>
+                        <p className="line-clamp-3 break-words text-sm leading-6" title={event.message}>{event.message}</p>
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                           <time dateTime={event.createdAt}>{date(event.createdAt)}</time>
-                          <span
-                            className="rounded border border-border px-1.5 py-0.5 font-mono text-[10px]"
-                            title="Activity events do not include verified code-diff metrics"
-                          >
-                            diff n/a
-                          </span>
+
                         </div>
                       </div>
                     </li>
@@ -388,6 +323,8 @@ export function Overview({ state, actions }) {
                   No workspace activity yet.
                 </p>
               )}
+              {events.length > 3 && <Button variant="ghost" size="sm" className="mt-4" aria-expanded={allActivity} onClick={() => setAllActivity(!allActivity)}>{allActivity ? "Show less history" : "Show more history"}</Button>}
+              <p className="mt-3 text-xs text-muted-foreground">Saved events, including resolved attempts. Current next steps appear on each project.</p>
             </CardContent>
           </Card>
           <Card className="border-border/50 bg-card">
@@ -396,7 +333,6 @@ export function Overview({ state, actions }) {
             </CardHeader>
             <CardContent className="space-y-1 px-3 pb-3">
               {[
-                [Box, "3D Workflow Guide", () => launchOnboarding(0)],
                 [FolderInput, "Import Repository", actions.addRepository],
                 [Bot, "Deploy New Agent", () => go("#agents")],
                 [Link, "Link Jira Board", actions.jiraSettings],
@@ -424,7 +360,7 @@ export function Overview({ state, actions }) {
         onOpenChange={setOnboardingOpen}
         state={state}
         actions={actions}
-        initialStage={onboardingStage}
+        initialStage={0}
       />
     </div>
   );
@@ -448,29 +384,10 @@ function Header({ state, actions = {} }) {
     return () => window.removeEventListener("keydown", handler);
   }, []);
   const results = workspaceSearch(state, query);
-  // Only the latest attempt per role/stage/task contributes to current notifications.
-  const latest = new Map();
-  for (const run of [...state.runs].sort(
-    (a, b) => (Date.parse(a.createdAt) || 0) - (Date.parse(b.createdAt) || 0),
-  ))
-    latest.set(`${run.questId}:${run.role}:${run.stage}:${run.taskId || run.workId || ""}`, run);
-  const attention = [...latest.values()].filter(
-    (r) =>
-      ["FAILED", "WAITING_INPUT", "INTERRUPTED"].includes(r.state) &&
-      state.quests.some((q) => q.id === r.questId),
-  );
+  const attention = currentAttentionRuns(state);
   return (
     <div className="dq-header flex items-center gap-2">
-      <Button
-        variant="outline"
-        size="sm"
-        className="h-9 gap-1.5 border-emerald-500/30 bg-emerald-500/10 text-xs text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200"
-        onClick={() => openOnboarding3D({ state, actions })}
-        aria-label="Open 3D Workflow Guide"
-      >
-        <Box className="size-3.5" />
-        <span className="hidden md:inline">3D Tour</span>
-      </Button>
+
       <Button
         variant="outline"
         className="h-9 gap-2 border-border bg-background text-muted-foreground sm:w-56 sm:justify-start"

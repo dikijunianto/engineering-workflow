@@ -178,8 +178,81 @@
 .dq-world-controls{position:absolute;bottom:34px;left:12px;display:flex;gap:4px;background:#131c25e8;border:1px solid #43515e;border-radius:6px;padding:4px}
 .dq-world-controls button{font-size:11px;padding:5px 8px;color:#d4e1e9;border-radius:3px}.dq-world-controls button:hover{background:#354553}.dq-world-controls button:focus-visible,.dq-world-label:focus-visible{outline:2px solid #92cdb8}
 .dq-world-help{position:absolute;bottom:9px;left:14px;font-size:10px;color:#9aafbf;margin:0}
-.dq-scene-loading,.dq-scene-fallback{position:absolute;top:25%;padding:24px;color:#c9d7e2;font-size:13px}.dq-scene-fallback ol{list-style:decimal;padding-left:24px}.dq-scene-fallback li{margin:10px 0}.dq-world-details summary{font-size:12px;cursor:pointer;padding:8px 0}
+.dq-scene-loading,.dq-scene-fallback{position:absolute;top:25%;padding:24px;color:#c9d7e2;font-size:13px}.dq-scene-fallback ul{list-style:none;padding-left:0}.dq-scene-fallback li{margin:10px 0}.dq-world-details summary{font-size:12px;cursor:pointer;padding:8px 0}
 @media(max-width:760px){.dq-world-layout{display:flex;flex-direction:column;overflow:auto}.dq-engineering-viewport{flex:none;height:360px}.dq-world-layout>div:last-child{overflow:visible}.dq-world-label{font-size:9px;padding:3px}.dq-world-controls{bottom:38px}}
 .dq-world-phase{position:absolute;bottom:81px;left:14px;right:14px;margin:0;font:11px ui-monospace,monospace;color:#d8c79f;pointer-events:none}
 
 .dq-scene-fallback{top:42px;bottom:100px;overflow:auto}
+
+/* Keep long saved evidence readable without widening its parent. */
+.dq-readable-document {line-height:1.8; overflow-wrap:anywhere}
+.dq-readable-document > :is(p,ul,ol,blockquote) {max-width:80ch}
+.dq-readable-document :is(h1,h2,h3) {line-height:1.3; margin-top:1.6em}
+.dq-readable-document table {display:block; max-width:100%; overflow-x:auto}
+.dq-readable-document pre {overflow:auto; max-width:100%}
+.dq-completed-board article {min-width:0; overflow-wrap:anywhere}
+.jira-issue-links {display:flex;flex-wrap:wrap;gap:8px 16px;margin:12px 0;min-width:160px}
+[data-jira-row][hidden] {display:none}
+.dq-world-label[aria-pressed="true"] {border-color:#34d399;color:#baf5de;background:#102b24}
+.dq-dashboard :is(summary,button,a,input,select,textarea):focus-visible {outline:2px solid #34d399;outline-offset:3px}
+
+.dq-readable-document > :first-child {margin-top:0}
+
+.dq-world-controls[hidden],.dq-world-phase[hidden],.dq-world-help[hidden] {display:none}
+
+/* Reading surfaces use page scrolling; only wide code and tables scroll within the page. */
+.dq-document-layout {display:grid; grid-template-columns:200px minmax(0,1fr); align-items:start; gap:24px}
+.dq-document-navigation {position:sticky; top:160px; max-height:calc(100vh - 180px); overflow:auto}
+.dq-document-outline {border-top:1px solid #27272a; padding:16px 12px; font-size:12px; color:#a1a1aa}
+.dq-document-outline summary {cursor:pointer; font-weight:600; margin-bottom:10px}
+.dq-document-outline nav {display:grid; gap:2px}
+.dq-document-outline button {text-align:left; color:#a1a1aa; padding:6px 8px; border-radius:4px; line-height:1.5; overflow-wrap:anywhere}
+.dq-document-outline button:hover {color:#fafafa; background:#27272a}
+.dq-document-reader {background:#141416}
+.dq-document-reader > :last-child {padding:32px clamp(20px,4vw,56px) 56px}
+.dq-readable-document {max-width:78ch; margin:0 auto; color:#d4d4d8; font-size:16px; line-height:1.85; overflow-wrap:anywhere}
+.dq-readable-document :is(h1,h2,h3,h4) {color:#fafafa; font-weight:600; letter-spacing:-.02em; scroll-margin-top:180px}
+.dq-readable-document h1 {font-size:28px; line-height:1.35; margin:0 0 28px; max-width:40ch}
+.dq-readable-document h2 {font-size:22px; margin:48px 0 18px; padding-bottom:12px; border-bottom:1px solid #303036}
+.dq-readable-document h3 {font-size:18px; margin:32px 0 14px}
+.dq-readable-document p {margin:16px 0}
+.dq-readable-document ul {list-style:disc; padding-left:26px; margin:18px 0}
+.dq-readable-document ol {list-style:decimal; padding-left:26px; margin:18px 0}
+.dq-readable-document li {margin:8px 0}
+.dq-readable-document code {font-size:.88em; background:#27272a; color:#e4e4e7; padding:2px 5px}
+.dq-readable-document pre {padding:20px; background:#09090b; border:1px solid #303036; line-height:1.65}
+.dq-readable-document pre code {background:none; padding:0}
+.dq-readable-document table {font-size:14px; margin:24px 0; line-height:1.6}
+.dq-readable-document :is(th,td) {padding:12px 16px; min-width:120px; vertical-align:top}
+.dq-readable-document th {color:#e4e4e7; background:#222225; letter-spacing:0; text-transform:none}
+.dq-brief-excerpt {font-size:15px; line-height:1.8; color:#d4d4d8; display:-webkit-box; -webkit-line-clamp:7; -webkit-box-orient:vertical; overflow:hidden}
+.dq-scope-progress {display:block; width:100%; height:6px; appearance:none; border:0; border-radius:4px; overflow:hidden; background:#27272a; accent-color:#34d399}
+.dq-scope-progress::-webkit-progress-bar {background:#27272a}
+.dq-scope-progress::-webkit-progress-value {background:#34d399}
+.dq-system {position:relative}
+.dq-system a {padding-right:32px}
+.dq-engine-indicator {position:absolute; right:14px; bottom:14px}
+.dq-jira-filters {display:grid; grid-template-columns:minmax(200px,1fr) minmax(0,2fr); gap:16px; align-items:end}
+.dq-jira-project-name {display:block; font-size:12px; color:#a1a1aa; margin-bottom:6px}
+.dq-jira-task-title {font-family:inherit; color:#e4e4e7; font-size:14px; line-height:1.6}
+.dq-jira-task-title:hover {color:#34d399}
+@media(max-width:1023px) {
+ .dq-document-layout {grid-template-columns:minmax(0,1fr)}
+ .dq-document-navigation {position:static; max-height:260px}
+ .dq-document-reader > :last-child {padding:24px 18px}
+ .dq-readable-document {font-size:16px}
+ .dq-readable-document h1 {font-size:24px}
+ .dq-jira-filters {grid-template-columns:minmax(0,1fr)}
+}
+
+.dq-brief-excerpt :is(ul,ol) {padding-left:22px; margin:10px 0; list-style:disc}
+
+.dq-mobile-document-picker {display:none}
+@media(max-width:1023px) {
+ .dq-document-navigation {display:none}
+ .dq-mobile-document-picker {display:block}
+ .dq-mobile-document-picker label {display:grid; gap:8px; color:#a1a1aa; font-size:13px}
+ .dq-mobile-document-picker select {width:100%; min-width:0; background:#18181b; border:1px solid #3f3f46; border-radius:8px; padding:10px; color:#fafafa}
+ .dq-mobile-document-picker .dq-document-outline {margin-top:12px; border:1px solid #27272a; border-radius:8px}
+ .dq-document-project-header {position:static}
+}

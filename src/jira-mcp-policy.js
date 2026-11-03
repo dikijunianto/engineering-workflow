@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import path from "node:path";
+export const confluenceReads = ["getAccessibleAtlassianResources", "getConfluencePage", "searchConfluenceUsingCql"];
 export const jiraMetadataReads = [
   "getAccessibleAtlassianResources",
   "getVisibleJiraProjects",
@@ -20,6 +21,15 @@ export function mcpDecision(policy, tool, input = {}) {
   const method = tool.slice(prefix.length);
   const cloudMatches = !policy.cloudId || input.cloudId === policy.cloudId || [policy.siteUrl, policy.siteUrl ? policy.siteUrl + "/" : null].filter(Boolean).includes(input.cloudId);
   if (method !== "getAccessibleAtlassianResources" && !cloudMatches) return false;
+  if (policy.stage === "confluence") {
+    if (method === "getAccessibleAtlassianResources") return true;
+    if (!policy.cloudId || input.cloudId !== policy.cloudId) return false;
+    if (method === "getConfluencePage") return /^\d+$/.test(String(input.pageId || "")) && (input.bodyFormat === "storage" || ["html", "markdown"].includes(input.contentFormat));
+    if (method !== "searchConfluenceUsingCql") return false;
+    return (input.limit === 2 && /^type = page AND title = "(?:[^"\\]|\\["\\])*"$/.test(input.cql || "")) ||
+      (input.limit === 10 && /^\d+$/.test(policy.mainId || "") &&
+        input.cql === `type = page AND ancestor = ${policy.mainId}`);
+  }
   const reads = policy.stage === "appendix" ? jiraMetadataReads : jiraPublishReads;
   if (reads.includes(method)) {
     if (policy.stage === "appendix" && method === "getVisibleJiraProjects") return input.searchString === policy.project && input.expandIssueTypes === false;
@@ -44,8 +54,8 @@ const quote = (s) => "'" + s.replaceAll("'", "'\\''") + "'";
 export function mcpGuardSettings(policy) {
   if (
     !/^[\w-]+$/.test(policy.server) ||
-    !/^[A-Z][A-Z0-9_]*$/.test(policy.project) ||
-    !["appendix", "verify", "publish"].includes(policy.stage)
+    (policy.stage !== "confluence" && !/^[A-Z][A-Z0-9_]*$/.test(policy.project)) ||
+    !["appendix", "verify", "publish", "confluence"].includes(policy.stage)
   )
     throw new Error("Invalid managed Jira MCP policy");
   const command = [

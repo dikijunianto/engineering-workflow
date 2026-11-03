@@ -208,14 +208,16 @@ export function CreateProjectForm({ state, jiraDefault, onCreate, onClose, busy,
   const [tab, setTab] = useState("details"),
     [kind, setKind] = useState("PRODUCT"),
     [source, setSource] = useState("text"),
-    [repos, setRepos] = useState(state.repositories.map((repo) => repo.id)),
+    [repos, setRepos] = useState([]),
     [jira, setJira] = useState(Boolean(initial.project)),
     [project, setProject] = useState(jiraDefault || ""),
     [jiraOverride, setJiraOverride] = useState(false),
     [custom, setCustom] = useState(false),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [progress, setProgress] = useState("");
   const config = workspace.projects[project] || { project };
   const bodyRef = useRef(null);
+  const confluenceAttempt = useRef(null);
   useEffect(() => {
     if (bodyRef.current) bodyRef.current.scrollTop = 0;
   }, [tab]);
@@ -255,12 +257,20 @@ export function CreateProjectForm({ state, jiraDefault, onCreate, onClose, busy,
     setError("");
     setBusy(true);
     try {
-      await onCreate(new FormData(form));
+      const values = new FormData(form);
+      const url = values.get("sourceType") === "confluence" ? values.get("url") : null;
+      if (url) {
+        if (confluenceAttempt.current?.url !== url)
+          confluenceAttempt.current = { url, id: crypto.randomUUID() };
+        setProgress("Starting read-only Confluence import…");
+      }
+      await onCreate(values, url ? { importId: confluenceAttempt.current.id, onProgress: setProgress } : undefined);
       onClose();
     } catch (reason) {
       if (/jira|epic/i.test(reason.message || "")) setTab("jira");
       setError(reason.message || "Project could not be created. Try again.");
     } finally {
+      setProgress("");
       setBusy(false);
     }
   }
@@ -376,7 +386,9 @@ export function CreateProjectForm({ state, jiraDefault, onCreate, onClose, busy,
                     required={source === "confluence"}
                   />
                   <span className="text-xs text-zinc-400">
-                    Main page plus directly linked pages only.
+                    {state.settings.confluenceProvider === "atlassian-mcp"
+                      ? "Imports the main page and up to nine linked or child pages. Retry in this dialog to reuse completed reads."
+                      : "Imports the main page and linked pages within the configured limit."}
                   </span>
                 </label>
               </div>
@@ -386,8 +398,9 @@ export function CreateProjectForm({ state, jiraDefault, onCreate, onClose, busy,
                 Affected Repositories
               </legend>
               <p className="mb-3 text-xs text-zinc-400">
-                Agents inspect only the repositories selected for this project.
+                Choose the repositories agents may read. Nothing is selected by default; writes remain limited to assigned worktrees.
               </p>
+              <p className="mb-3 text-xs text-emerald-300" role="status">{repos.length ? `Readable scope: ${state.repositories.filter(r => repos.includes(r.id)).map(r => r.name).join(", ")}` : "No repository access selected"}</p>
               <div className="flex flex-wrap gap-2">
                 {state.repositories.map((repo) => (
                   <label key={repo.id} className="relative cursor-pointer">
@@ -653,6 +666,9 @@ export function CreateProjectForm({ state, jiraDefault, onCreate, onClose, busy,
         </div>
       </Tabs>
       <DialogFooter className="sticky bottom-0 z-10 shrink-0 flex-row flex-wrap items-center justify-end gap-3 border-t border-zinc-800 bg-zinc-900 px-5 py-4 sm:px-6">
+        {busy && progress && (
+          <p role="status" className="w-full text-xs text-zinc-300">{progress}</p>
+        )}
         {error && (
           <div role="alert" className="max-h-16 w-full overflow-y-auto text-xs text-red-300">
             {error}
@@ -673,7 +689,7 @@ export function CreateProjectForm({ state, jiraDefault, onCreate, onClose, busy,
           className="rounded-lg bg-emerald-400 px-5 py-2 font-semibold text-zinc-950 hover:bg-emerald-300"
         >
           <Plus />
-          {busy ? "Creating…" : "Create Project"}
+          {busy ? (progress ? "Importing…" : "Creating…") : "Create Project"}
         </Button>
       </DialogFooter>
     </form>

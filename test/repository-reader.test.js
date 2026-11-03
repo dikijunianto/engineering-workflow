@@ -171,6 +171,13 @@ for (const Runtime of [ClaudeCodeRuntime,CodexRuntime]) test(`${Runtime.name} ta
       : JSON.parse(args.find(a=>a.startsWith('mcp_servers=')).match(/url=("[^"]+")/)[1]);
     const good=await rpc(url,'tools/call',{name:'ReadRepositoryFile',arguments:{repoId:'finance',path:'README.md'}});
     assert.match(good.content[0].text,/Harmless finance/);
+    if (Runtime === CodexRuntime) {
+      const assigned = await rpc(url, 'tools/call', {
+        name: 'ReadRepositoryFile', arguments: { repoId: 'funding', path: 'README.md' },
+      });
+      assert.match(assigned.content[0].text, /Harmless funding/);
+      assert.match(options.input, /Assigned writable worktree read IDs:.*"funding"/);
+    }
     for(const arguments_ of [{repoId:'unselected',path:'README.md'},{repoId:'finance',path:'../unselected/README.md'}])
       assert.equal((await rpc(url,'tools/call',{name:'ReadRepositoryFile',arguments:arguments_})).isError,true);
     assert.equal((await rpc(url,'tools/call',{name:'WriteRepositoryFile',arguments:{repoId:'finance',path:'README.md',content:'bad'}})).isError,true);
@@ -186,7 +193,10 @@ for (const Runtime of [ClaudeCodeRuntime,CodexRuntime]) test(`${Runtime.name} ta
     assert.equal(invocation.args[invocation.args.indexOf('--tools')+1],'Read,Glob,Grep,Edit,Write');
     assert.match(invocation.args[invocation.args.indexOf('--allowedTools')+1],/mcp__devquest_repository__ReadRepositoryFile/);
     assert.doesNotMatch(invocation.args[invocation.args.indexOf('--disallowedTools')+1],/mcp__\*/);
-  } else assert.equal(invocation.args[invocation.args.indexOf('--sandbox')+1],'workspace-write');
+  } else {
+    assert.equal(invocation.args[invocation.args.indexOf('--sandbox')+1],'workspace-write');
+    assert.ok(!events.find(e => e.type === "access" && e.arguments)?.arguments.join(" ").match(/127\.0\.0\.1:\d+\/[a-f0-9]+/));
+  }
   assert.ok(events.some(e=>e.type==='repository-tool'&&e.call.status==='PASSED'));
 });
 
